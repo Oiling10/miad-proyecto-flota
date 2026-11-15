@@ -1,0 +1,12 @@
+variable,spearman_con_km_dia_ciclo,n,importancia_rf
+km_dia_tel,0.991,24,
+n_ralenti_excesivo,-0.564,24,0.231
+ralenti_h_dia,0.43,24,0.102
+n_desconexion_bateria,-0.304,24,0.277
+n_sin_cobertura,-0.268,24,0.124
+n_correctivos_intervalo,-0.174,24,0.0
+n_alertas_volt,-0.157,24,0.128
+volt_min,0.11,24,0.055
+volt_medio,0.05,24,0.048
+pct_sin_gps,-0.013,24,0.023
+n_conductores,0.011,24,0.012

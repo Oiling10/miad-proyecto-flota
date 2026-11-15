@@ -6,3 +6,5 @@ data/raw/
 data/llaves/
 ~$*
 data/procesados/
+
+.DS_Store
