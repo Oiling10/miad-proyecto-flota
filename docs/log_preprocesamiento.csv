@@ -1,0 +1,46 @@
+paso,detalle
+columnas,eliminadas 20 (incluye AssetName) -> 24 restantes
+duplicados,213221 -> 213221 filas (EventKey único)
+fechas,inicio inválido: 0 | fin < inicio: 0
+duracion,> 1 h: 13829 | > 24 h: 35 | atípicas (p99.9 por evento): 213
+odometro,lecturas reales: 46398 (21.8%) | retrocesos: 0
+voltaje,lecturas: 21532 | en 0 mV: 658
+coord_ini,fuera de rango: 0
+coord_fin,fuera de rango: 0
+coord_imputadas,fin: 65893 | inicio: 20888 | sin ninguna: 19121
+final_eventos,213221 filas x 30 columnas
+diario,2038 camioneta-días | sin eventos: 173
+km_dia,con dato: 1656 | interpolados (huecos <= 7 d): 29
+odo_cobertura,VH-06: km_dia con dato en 98% de 410 días
+odo_cobertura,VH-07: km_dia con dato en 98% de 410 días
+odo_cobertura,VH-08: km_dia con dato en 13% de 399 días
+odo_cobertura,VH-09: km_dia con dato en 98% de 410 días
+odo_cobertura,VH-10: km_dia con dato en 98% de 409 días
+vehiculos_columnas,43 originales | vacías: 6 | constantes: 32
+vehiculos_typos,carrocería con 'CABIAN' corregido a 'CABINA': 1
+vehiculos,5 filas x 6 columnas (antigüedad al 2026-09-14)
+mantenimientos,117 -> 117 filas | nulos: 0
+visitas,104 visitas | con preventivo + correctivo el mismo día: 13
+km_nominal_typo,descripciones con typo de miles corregidas: 1
+preventivos,98 | km nominal no extraído: 0 | km entre preventivos (mediana): 5356 | días entre preventivos (mediana): 43
+km,decrecientes: 0
+correctivos,"19 | sin sistema clasificado: 0 | {'frenos': 7, 'suspension_direccion': 4, 'bateria_electrico': 3, 'caja_transmision': 3, 'correas_accesorios': 3, 'motor_admision': 1, 'carroceria_otros': 1}"
+plan,"filas: 105 | {'ejecutado': 98, 'pendiente': 4, 'omitido': 2, 'conflicto_plan_vs_mant': 1}"
+conciliacion,plan ejecutado con preventivo el mismo día: 94.9% | mismo km: 89.8% | mismo servicio nominal: 92.9%
+plan_desv_km,"vs nominal (mediana, p75, max): 1166, 1758, 4250"
+plan_fechas,fecha programada inválida en origen: 1
+no_programado,3 de 19 correctivos a más de 3 d de un preventivo (16%); en la misma visita del preventivo: 13
+no_programado_sensibilidad,"% de correctivos a más de X días de un preventivo: {0: '32%', 1: '16%', 3: '16%', 5: '11%', 7: '11%', 15: '5%'}"
+no_programado_baseline,"Las guías reportan 70 % (270 de 384, flota completa 2025); esta muestra son 5 camionetas y 19 correctivos: no es comparable"
+cruce,vehiculos (por equivalencia): 5 de 5 placas de eventos (100%)
+cruce,mantenimientos (por equivalencia): 5 de 5 placas de eventos (100%)
+desfase_km,"mediana (km eventos - km hojas) por camioneta: {'VH-06': -489, 'VH-07': -1229, 'VH-08': -1352, 'VH-09': -559, 'VH-10': -1492}"
+km_desde_prev_calidad,"negativos (error del desfase, <= 400 km): 35 | > 12.000 km (ciclos largos o servicio omitido): 10"
+diario_prev,2038 camioneta-días | con km desde el último preventivo: 1664 | con objetivo real (siguiente preventivo conocido): 1316 | censurados: 365
+ciclos,"97 ciclos (93 cerrados, 4 abiertos) | con telemetría >= 80%: 28 | con falla no programada: 3"
+ciclos_km,km por ciclo (mediana): 5356 | días (mediana): 43 | km/día (mediana): 124.2
+pca,"17 variables diarias | faltantes rellenados con la mediana: 2.3% | componentes para 90 % de la varianza: 7 | PC1-3: [0.361, 0.189, 0.12]"
+correlaciones_altas,2 pares con |r| > 0.9: n_dlp_desconexion_bateria~n_obc_unit_reset; n_dlp_no_gsm_coverage~odo_lecturas
+importancia,"ciclos usados: 24 (exploratorio, sin conclusiones causales) | MAE validación por camioneta: RF 30.1 vs mediana 21.8 km/día"
+importancia_top,"{'km_dia_tel': 0.99, 'n_ralenti_excesivo': 0.56, 'ralenti_h_dia': 0.43, 'n_desconexion_bateria': 0.3}"
+segmentos,"{'VH-06': 'alto', 'VH-07': 'alto', 'VH-08': 'medio', 'VH-09': 'bajo', 'VH-10': 'alto'} (alto >= 100 km/día, bajo < 50)"
