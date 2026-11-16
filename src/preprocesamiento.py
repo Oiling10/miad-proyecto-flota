@@ -1,10 +1,21 @@
 """
-Pre-procesamiento de datos (Guía 4, Parte 3).
-Entrada: data/anonimizados/ (solo lectura).
-Salida: data/procesados/ (ignorada por Git) y docs/log_preprocesamiento.csv
+Pre-procesamiento de datos (Guía 4, Partes II y III).
 
-Eventos (Detailed Event Report): decisiones validadas con el EDA.
-Hojas de vida: pendiente de revisión con su propio EDA.
+Entrada : data/anonimizados/  (salida de src/anonimizar.py; solo lectura)
+          - Consolidado_Hojas_de_Vida_anonimizado.xlsx (Vehículos, Mantenimientos, Plan)
+          - Detailed Event Report_anonimizado.csv      (eventos de la plataforma GPS)
+          - Daily Movement Report_anonimizado.csv      (viajes de la plataforma GPS)
+Salidas : data/procesados/  (tablas fila a fila; ignoradas por Git)
+          docs/log_preprocesamiento.csv   (qué pasó en cada paso, con conteos)
+          docs/reglas_limpieza.csv        (regla por campo: problema -> tratamiento -> justificación;
+                                           es la regla que se aplica igual a los datos nuevos)
+          docs/*.csv                      (resultados agregados de las técnicas de entendimiento)
+
+Principios:
+- Las tres fuentes usan el MISMO código de camioneta (VH-01...); no hay equivalencias inferidas.
+- Ninguna fila se elimina salvo duplicados exactos; los problemas se marcan con banderas.
+- Toda variable de la tabla diaria usa solo información disponible hasta ese día
+  (sin fuga de información); el objetivo (próximo preventivo) se guarda aparte.
 """
 import re
 import unicodedata
@@ -23,20 +34,24 @@ DOCS_DIR.mkdir(exist_ok=True)
 PAT_PLACA_REAL = r"(?<![A-Za-z0-9])(?!FAC)[A-Za-z]{3}-?\d{3}(?![A-Za-z0-9])"
 LAT_RANGO, LON_RANGO = (-5, 14), (-80, -66)  # límites aproximados de Colombia
 MAX_HUECO_ODO_DIAS = 7                        # huecos de odómetro que se interpolan
+MAX_KM_DIA = 600                              # km/día físicamente posible en la operación
+UMBRAL_HUECO_ODO_KM = 1.0                     # salto de odómetro entre viajes que indica viajes no reportados
+VIAJE_CORTO_KM = 2.0                          # viaje corto (poca carga de la batería)
+EVENTO_VOLTAJE_PROMEDIO = "P.D.C Voltaje Bateria Promedio"
 LOG = []
+REGLAS = []
 
-# Columnas del Detailed Event Report que se eliminan (AssetName se elimina al cargar)
-COLS_ELIMINAR = [
-    # 100 % vacías
+# Columnas que no aportan información. Se eliminan solo si, al ejecutar, siguen
+# vacías o constantes (la regla se verifica con los datos, no se asume).
+COLS_ELIMINAR_EVENTOS = [
     "Asset2ReportGroup", "FleetNumber", "RoadSpeedLimit", "EventLocation",
-    "F_StartRegion", "F_EndRegion",
-    # constantes o sin información
-    "TripID", "FuelUsed", "DistanceCalculatedFromOdo", "EndOdo",
-    "TotalOccurs", "TimeZone", "AssetSiteName", "ReportGroup",
-    # redundante con el nombre del conductor
-    "AssetExtra2",
-    # calle y barrio: 63-84 % [UNKNOWN]
-    "F_StartStreet", "F_StartSuburb", "F_EndStreet", "F_EndSuburb",
+    "F_StartRegion", "F_EndRegion", "TripID", "FuelUsed",
+    "DistanceCalculatedFromOdo", "EndOdo", "TotalOccurs", "TimeZone",
+    "AssetSiteName", "ReportGroup", "MeasurementUnits",
+]
+COLS_ELIMINAR_VIAJES = [
+    "FleetNumber", "TripClassificationComment", "PassengerList", "BlankJourneyType",
+    "TripType", "NrOfVisits", "TimeZone1", "TimeZone2", "TimeZone", "SiteName",
 ]
 
 REGLAS_SISTEMA = {
@@ -52,6 +67,29 @@ REGLAS_SISTEMA = {
 def registrar(paso, detalle):
     LOG.append({"paso": paso, "detalle": detalle})
     print(f"[{paso}] {detalle}")
+
+
+def regla(fuente, campo, causa, problema, tratamiento, justificacion, afectados):
+    """Regla de limpieza documentada (Guía 4, Parte II).
+    causa: a) fuera de rango | b) inválido/vacío/tipo | c) valor extremo | d) relación que no debería existir
+    tratamiento: eliminar columna | eliminar fila | imputar | bandera | corregir | no aplicar"""
+    REGLAS.append({"fuente": fuente, "campo": campo, "causa_guia": causa, "problema": problema,
+                   "tratamiento": tratamiento, "justificacion": justificacion,
+                   "registros_afectados": afectados})
+
+
+def _eliminar_si_sin_informacion(df, columnas, fuente):
+    """Elimina las columnas listadas que, en estos datos, están vacías o son constantes."""
+    quitar, conservar = [], []
+    for c in columnas:
+        if c not in df.columns:
+            continue
+        (quitar if df[c].nunique(dropna=True) <= 1 else conservar).append(c)
+    if conservar:
+        registrar(f"{fuente}_columnas", f"listadas para eliminar pero con información (se conservan): {conservar}")
+    regla(fuente, ", ".join(quitar), "b", "Columnas 100 % vacías o con un único valor (p. ej. TripID = '#Error')",
+          "eliminar columna", "No aportan información para ningún objetivo de análisis", len(quitar))
+    return df.drop(columns=quitar)
 
 
 def _slug(texto):
@@ -75,8 +113,8 @@ def a_numero(s):
 
 def clasificar_sistema(texto):
     t = str(texto).lower()
-    for sistema, regla in REGLAS_SISTEMA.items():
-        if re.search(regla, t):
+    for sistema, patron in REGLAS_SISTEMA.items():
+        if re.search(patron, t):
             return sistema
     return "sin_clasificar"
 
@@ -84,15 +122,14 @@ def clasificar_sistema(texto):
 # ---------- EVENTOS ----------
 def cargar_eventos():
     ruta = IN_DIR / "Detailed Event Report_anonimizado.csv"
-    ev = pd.read_csv(ruta, sep=None, engine="python", encoding="utf-8-sig")
-    # Privacidad: AssetName trae la placa real; se descarta al cargar
-    return ev.drop(columns=["AssetName"])
+    return pd.read_csv(ruta, encoding="utf-8-sig", dtype=str)
 
 
 def limpiar_eventos(ev):
-    ev = ev.drop(columns=COLS_ELIMINAR).copy()
+    c0 = ev.shape[1]
+    ev = _eliminar_si_sin_informacion(ev, COLS_ELIMINAR_EVENTOS, "eventos").copy()
     n0 = len(ev)
-    registrar("columnas", f"eliminadas {len(COLS_ELIMINAR) + 1} (incluye AssetName) -> {ev.shape[1]} restantes")
+    registrar("columnas", f"eventos: {c0} -> {ev.shape[1]} columnas")
 
     ev = ev.rename(columns={"AssetExtra": "placa", "AssetName2": "conductor",
                             "EventDescription": "evento", "EventType": "tipo_evento"})
@@ -109,49 +146,57 @@ def limpiar_eventos(ev):
     registrar("fechas", f"inicio inválido: {int(ev['inicio'].isna().sum())} | fin < inicio: {int((ev['fin'] < ev['inicio']).sum())}")
     registrar("duracion", f"> 1 h: {int((ev['duracion_s'] > 3600).sum())} | > 24 h: {int((ev['duracion_s'] > 86400).sum())} | atípicas (p99.9 por evento): {int(ev['duracion_atipica'].sum())}")
 
+    regla("eventos", "TotalDuration", "c", f"Duraciones extremas (> 24 h: {int((ev['duracion_s'] > 86400).sum())}), casi todas en pérdidas de cobertura",
+          "bandera (duracion_atipica, p99,9 por tipo de evento)",
+          "Son reales (la unidad estuvo sin señal); eliminarlas borraría los huecos de monitoreo, que se tratan como dato faltante", int(ev["duracion_atipica"].sum()))
+
     # Odómetro: 0.00 = no medido en ese tipo de evento (no se imputa por evento)
     ev["odo"] = _a_numero_con_coma_miles(ev["StartOdo"]).replace(0, np.nan)
     o = ev.loc[ev["odo"].notna()].sort_values(["placa", "inicio"])
     retro = int((o.groupby("placa")["odo"].diff() < 0).sum())
     registrar("odometro", f"lecturas reales: {len(o)} ({len(o) / len(ev):.1%}) | retrocesos: {retro}")
+    regla("eventos", "StartOdo", "b", "Texto con coma de miles; 0,00 en el 78 % de los eventos (no se mide en ese tipo de evento)",
+          "corregir formato; 0 -> faltante", "El 0 no es una lectura: el odómetro solo se reporta en pérdidas de cobertura y desconexiones",
+          int(ev["odo"].isna().sum()))
 
-    # Voltaje (mV): solo existe en eventos de voltaje (nulo por diseño, no se imputa)
-    ev["voltaje_mv"] = _a_numero_con_coma_miles(ev["EventValue"])
-    ev["voltaje_cero"] = ev["voltaje_mv"].eq(0)
-    registrar("voltaje", f"lecturas: {int(ev['voltaje_mv'].notna().sum())} | en 0 mV: {int(ev['voltaje_cero'].sum())}")
+    # Voltaje (mV): el promedio periódico y las alertas son mediciones DISTINTAS.
+    # Las alertas solo se disparan por debajo de un umbral: mezclarlas sesga el voltaje hacia abajo.
+    valor = _a_numero_con_coma_miles(ev["EventValue"])
+    es_prom = ev["evento"].eq(EVENTO_VOLTAJE_PROMEDIO)
+    ev["voltaje_mv"] = valor.where(es_prom)                 # solo el promedio periódico
+    ev["voltaje_alerta_mv"] = valor.where(~es_prom)         # valor reportado en las alertas
+    ev["voltaje_cero"] = es_prom & valor.eq(0)
+    ev.loc[ev["voltaje_cero"], "voltaje_mv"] = np.nan
+    fuera = es_prom & (ev["voltaje_mv"] > 16000)
+    ev.loc[fuera, "voltaje_mv"] = np.nan
+    registrar("voltaje", f"promedios: {int(es_prom.sum())} | en 0 mV (-> faltante): {int(ev['voltaje_cero'].sum())} | "
+                         f"> 16 V (-> faltante): {int(fuera.sum())} | alertas con valor: {int(ev['voltaje_alerta_mv'].notna().sum())}")
+    regla("eventos", "EventValue (voltaje promedio)", "a", "Lecturas en 0 mV con el vehículo reportando eventos",
+          "faltante (no se imputa)", "Un 0 V no es físicamente posible con la unidad encendida: es pérdida de alimentación del equipo; "
+          "imputarlo inventaría una medición de la señal que se quiere vigilar", int(ev["voltaje_cero"].sum()))
+    regla("eventos", "EventValue (alertas)", "d", "Las alertas (<10 V, <9,5 V) traen valor de voltaje, pero solo existen cuando el voltaje cae",
+          "separar: voltaje_mv (promedio) y voltaje_alerta_mv", "Mezclarlas con los promedios sesga la mediana del voltaje hacia abajo; "
+          "las alertas se usan como conteo diario", int(ev["voltaje_alerta_mv"].notna().sum()))
+    regla("eventos", "EventValue (voltaje promedio)", "c", "Caídas de voltaje profundas (hasta ~3 V en promedio diario)",
+          "conservar", "Son la señal de deterioro de la batería que busca OA3; solo se descartan valores físicamente imposibles", 0)
 
-    # Coordenadas
-    for suf, col in (("ini", "StartLatLong"), ("fin", "EndLatLong")):
-        xy = ev[col].astype("string").str.split(",", expand=True)
-        ev[f"lat_{suf}"] = pd.to_numeric(xy[0], errors="coerce")
-        ev[f"lon_{suf}"] = pd.to_numeric(xy[1], errors="coerce")
-        fuera = (~ev[f"lat_{suf}"].between(*LAT_RANGO) | ~ev[f"lon_{suf}"].between(*LON_RANGO)) & ev[f"lat_{suf}"].notna()
-        ev.loc[fuera, [f"lat_{suf}", f"lon_{suf}"]] = np.nan
-        registrar(f"coord_{suf}", f"fuera de rango: {int(fuera.sum())}")
-    ev["sin_gps_inicio"] = ev["lat_ini"].isna()
-    ev["sin_gps_fin"] = ev["lat_fin"].isna()
-    # Inicio y fin casi coinciden (> 99 % a menos de 50 m): se completa uno con el otro, con marca
-    ev["fin_imputado"] = ev["lat_fin"].isna() & ev["lat_ini"].notna()
-    ev["ini_imputado"] = ev["lat_ini"].isna() & ev["lat_fin"].notna()
-    for c in ("lat", "lon"):
-        ev[f"{c}_fin"] = ev[f"{c}_fin"].fillna(ev[f"{c}_ini"])
-        ev[f"{c}_ini"] = ev[f"{c}_ini"].fillna(ev[f"{c}_fin"])
-    registrar("coord_imputadas", f"fin: {int(ev['fin_imputado'].sum())} | inicio: {int(ev['ini_imputado'].sum())} | sin ninguna: {int(ev['lat_ini'].isna().sum())}")
-
-    # [UNKNOWN] = evento sin posición GPS -> faltante real
-    ciudades = ["F_StartCity", "F_StartTown", "F_EndCity", "F_EndTown"]
-    ev[ciudades] = ev[ciudades].replace("[UNKNOWN]", np.nan)
-    ev = ev.rename(columns={"F_StartCity": "ciudad_ini", "F_StartTown": "municipio_ini",
-                            "F_EndCity": "ciudad_fin", "F_EndTown": "municipio_fin",
-                            "StartLocation": "geocerca_ini", "EndLocation": "geocerca_fin"})
+    # Región (la anonimización eliminó coordenadas, calles y municipios; queda la región)
+    for col, nuevo in (("F_StartTown", "region_ini"), ("F_EndTown", "region_fin")):
+        if col in ev:
+            ev[nuevo] = ev[col].replace("Sin dato", np.nan)
+    ev["sin_gps_inicio"] = ev["region_ini"].isna() if "region_ini" in ev else False
+    registrar("ubicacion", f"eventos sin posición (región 'Sin dato'): {int(ev['sin_gps_inicio'].sum())} ({ev['sin_gps_inicio'].mean():.1%})")
+    regla("eventos", "Ubicación", "b", "Sin posición GPS en ~19 % de los eventos",
+          "no aplicar imputación", "Ningún objetivo de análisis usa la ubicación; imputar coordenadas no aporta al problema", int(ev["sin_gps_inicio"].sum()))
 
     # Conductor sin identificar
-    ev["conductor_sin_identificar"] = ev["conductor"].eq("Conductor no identificado")
+    ev["conductor_sin_identificar"] = ev["conductor"].eq("Conductor sin identificar")
+    regla("eventos", "AssetName2 (conductor)", "b", "Conductor sin identificar en ~22 % de los eventos",
+          "bandera (conductor_sin_identificar)", "Los conductores rotan entre camionetas (11 a 18 por vehículo); no se usa para atribuir el estado de la batería", int(ev["conductor_sin_identificar"].sum()))
 
     # Se descartan las columnas de texto ya convertidas
     ev = ev.drop(columns=["EventStartDate", "EventStartTime", "EventEndDate", "EventEndTime",
-                          "TotalDuration", "StartOdo", "EventValue", "MeasurementUnits",
-                          "StartLatLong", "EndLatLong"])
+                          "TotalDuration", "StartOdo", "EventValue", "F_StartTown", "F_EndTown"], errors="ignore")
 
     # Control de privacidad: ninguna placa real debe sobrevivir
     for c in ev.columns:
@@ -183,7 +228,7 @@ def agregar_eventos_dia(ev):
     conteo.columns = ["n_" + _slug(c) for c in conteo.columns]
 
     volt = (d[d["voltaje_mv"] > 0].groupby(idx)["voltaje_mv"]
-              .agg(voltaje_min="min", voltaje_medio="mean"))
+              .agg(voltaje_min="min", voltaje_medio="mean", n_lecturas_voltaje="count"))
     ralenti = (d[d["evento"].str.startswith("EC Ralenti")].groupby(idx)["duracion_s"]
                  .sum().rename("duracion_ralenti_s"))
     extra = d.groupby(idx).agg(n_eventos=("EventKey", "size"),
@@ -214,12 +259,122 @@ def agregar_eventos_dia(ev):
     return diario
 
 
+# ---------- VIAJES (Daily Movement Report) ----------
+def cargar_viajes():
+    ruta = IN_DIR / "Daily Movement Report_anonimizado.csv"
+    return pd.read_csv(ruta, encoding="utf-8-sig", dtype=str) if ruta.exists() else None
+
+
+def limpiar_viajes(vj):
+    c0, n0 = vj.shape[1], len(vj)
+    vj = _eliminar_si_sin_informacion(vj, COLS_ELIMINAR_VIAJES, "viajes").copy()
+    vj = vj.rename(columns={"AssetExtra": "placa", "AssetName2": "conductor"})
+    fmt = "%d/%m/%Y %H:%M:%S"
+    vj["salida"] = pd.to_datetime(vj["DepartureDate"] + " " + vj["DepartureTime"], format=fmt, errors="coerce")
+    vj["llegada"] = pd.to_datetime(vj["ArrivalDate"] + " " + vj["ArrivalTime"], format=fmt, errors="coerce")
+    for c in ("Distance", "StartOdoMeter", "EndOdoMeter", "MaxSpeed", "AvgSpeed", "TotalFuelUsedMeasured", "CalcFuelConsumption"):
+        vj[c] = _a_numero_con_coma_miles(vj[c])
+    for c in ("DrivingTime", "StandingTime", "Duration"):
+        vj[c + "_s"] = pd.to_timedelta(vj[c], errors="coerce").dt.total_seconds()
+    regla("viajes", "Distance, odómetros, tiempos", "b", "Números como texto con coma de miles; fechas y horas en columnas separadas",
+          "corregir formato", "Necesario para sumar km y construir la serie diaria", len(vj))
+
+    # Duplicados: misma camioneta, hora de salida y odómetro (aparecen al cierre del reporte)
+    dup = vj.duplicated(["placa", "salida", "StartOdoMeter"])
+    vj = vj[~dup].sort_values(["placa", "salida"]).reset_index(drop=True)
+    regla("viajes", "Viaje", "b", "Viajes repetidos (misma camioneta, hora y odómetro)", "eliminar fila",
+          "Duplicado exacto: contarlo dos veces infla los km del día", int(dup.sum()))
+
+    # Consistencia interna: distancia = diferencia de odómetro
+    dif = (vj["EndOdoMeter"] - vj["StartOdoMeter"] - vj["Distance"]).abs()
+    registrar("viajes_consistencia", f"viajes con |distancia - (odo fin - odo ini)| > 0,1 km: {int((dif > 0.1).sum())} de {len(vj)}")
+
+    # Huecos: salto de odómetro entre el fin de un viaje y el inicio del siguiente = viajes no reportados
+    vj["hueco_odo_km"] = vj["StartOdoMeter"] - vj.groupby("placa")["EndOdoMeter"].shift()
+    huecos = vj["hueco_odo_km"] > UMBRAL_HUECO_ODO_KM
+    retro = vj["hueco_odo_km"] < -UMBRAL_HUECO_ODO_KM
+    registrar("viajes_huecos", f"saltos de odómetro > {UMBRAL_HUECO_ODO_KM} km entre viajes: {int(huecos.sum())} "
+                               f"(suman {vj.loc[huecos, 'hueco_odo_km'].sum():,.0f} km) | retrocesos: {int(retro.sum())}")
+    regla("viajes", "StartOdoMeter vs. viaje anterior", "d", "Salto de odómetro entre viajes consecutivos (viajes no reportados)",
+          "bandera; los días del hueco quedan sin dato (no se imputan como 0 km ni se cargan al día de reinicio)",
+          "Distinguir 'sin dato' de 'sin uso': el hueco de 4.360 km de VH-05 coincide con 51 días sin viajes", int(huecos.sum()))
+
+    # Consumo: valores absurdos en viajes muy cortos
+    absurdo = vj["Distance"] < 1
+    regla("viajes", "CalcFuelConsumption", "c", f"Consumo calculado de hasta {vj['CalcFuelConsumption'].max():,.0f} en viajes de pocos metros",
+          "no usar por viaje; recalcular por día excluyendo viajes < 1 km", "El cociente combustible/distancia explota cuando la distancia tiende a 0",
+          int(absurdo.sum()))
+    registrar("viajes", f"{n0} -> {len(vj)} filas | {c0} -> {vj.shape[1]} columnas | periodo {vj['salida'].min():%Y-%m-%d} a {vj['salida'].max():%Y-%m-%d}")
+    return vj
+
+
+def agregar_viajes_dia(vj):
+    """Camioneta x día desde los viajes. Un día sin viajes es 'sin uso' (0 km) si el odómetro
+    no cambió entre el viaje anterior y el siguiente; si cambió, es 'sin dato'."""
+    vj = vj.copy()
+    vj["fecha"] = vj["salida"].dt.normalize()
+    vj["viaje_corto"] = vj["Distance"] < VIAJE_CORTO_KM
+    largos = vj[vj["Distance"] >= 1]
+    g = vj.groupby(["placa", "fecha"])
+    dia = g.agg(km_dia_viajes=("Distance", "sum"), n_viajes=("Distance", "size"),
+                n_viajes_cortos=("viaje_corto", "sum"), horas_conduccion=("DrivingTime_s", "sum"),
+                vel_max=("MaxSpeed", "max"), odo_ini_viajes=("StartOdoMeter", "min"),
+                odo_fin_viajes=("EndOdoMeter", "max"), hueco_km=("hueco_odo_km", lambda s: s[s > UMBRAL_HUECO_ODO_KM].sum()))
+    dia["horas_conduccion"] /= 3600
+    comb = largos.groupby(["placa", "fecha"]).agg(comb=("TotalFuelUsedMeasured", "sum"), dist=("Distance", "sum"))
+    dia["litros_100km"] = (comb["comb"] / comb["dist"] * 100).where(comb["dist"] > 5)
+    partes = []
+    ini, fin = vj["fecha"].min(), vj["fecha"].max()
+    for placa, gp in dia.reset_index().groupby("placa"):
+        gp = gp.set_index("fecha").reindex(pd.date_range(ini, fin, freq="D"))
+        gp["placa"] = placa
+        gp["dia_con_viajes"] = gp["n_viajes"].notna()
+        # ¿El día sin viajes está dentro de un hueco de odómetro?
+        odo_prev = gp["odo_fin_viajes"].ffill()
+        odo_sig = gp["odo_ini_viajes"].bfill()
+        sin_uso = (~gp["dia_con_viajes"] & ((odo_sig - odo_prev).abs() <= UMBRAL_HUECO_ODO_KM)).fillna(False).astype(bool)
+        gp.loc[sin_uso, ["km_dia_viajes", "n_viajes", "n_viajes_cortos", "horas_conduccion"]] = 0
+        gp["estado_dia"] = np.select([gp["dia_con_viajes"].to_numpy(bool), sin_uso.to_numpy(bool)], ["con viajes", "sin uso"], "sin dato")
+        # El día en que se reanudan los datos después de un hueco no recibe los km del hueco
+        partes.append(gp.rename_axis("fecha").reset_index())
+    out = pd.concat(partes, ignore_index=True)
+    resumen = out.groupby("placa")["estado_dia"].value_counts().unstack(fill_value=0)
+    registrar("viajes_dia", "días por estado y camioneta: " + str(resumen.to_dict(orient="index")))
+    return out
+
+
+def factor_odometro(viajes_dia, eventos_dia, m):
+    """Factor km_taller / odómetro GPS por camioneta, con los días de preventivo.
+    El sesgo es proporcional (la telemetría pierde km cuando no tiene señal), por eso es un
+    factor y no un desfase fijo."""
+    prev = m[~m["es_correctivo"]][["placa", "fecha", "km"]].copy()
+    prev["fecha"] = prev["fecha"].astype("datetime64[ns]")
+    filas = []
+    for fuente, tabla, col in (("viajes", viajes_dia, "odo_ini_viajes"), ("eventos", eventos_dia, "odo_interp")):
+        if tabla is None or col not in tabla:
+            continue
+        t = tabla[["placa", "fecha", col]].dropna()
+        t["fecha"] = t["fecha"].astype("datetime64[ns]")
+        x = prev.merge(t, on=["placa", "fecha"])
+        x["factor"] = x["km"] / x[col]
+        x["fuente"] = fuente
+        filas.append(x[["placa", "fecha", "km", col, "factor", "fuente"]].rename(columns={col: "odo_gps"}))
+    cruces = pd.concat(filas, ignore_index=True)
+    cruces["sesgo_pct"] = (cruces["odo_gps"] / cruces["km"] - 1) * 100
+    factor = cruces.groupby("placa")["factor"].median()
+    resumen = cruces.groupby(["placa", "fuente"])["sesgo_pct"].agg(["median", "count"]).round(2)
+    registrar("factor_odometro", "sesgo GPS vs. taller (% mediano, n): " + str(resumen.to_dict(orient="index")))
+    regla("eventos/viajes", "Odómetro GPS", "d", f"El odómetro GPS queda por debajo del km del taller "
+          f"({cruces['sesgo_pct'].min():.1f} % a {cruces['sesgo_pct'].max():.1f} %); riesgo 1.2.1 de la Guía 3",
+          "corregir: factor por camioneta (mediana de km_taller / odo_gps en días de preventivo)",
+          "El sesgo es estable dentro de cada camioneta y crece con los km (pérdida de señal), por eso un factor y no un desfase fijo",
+          len(cruces))
+    return factor, cruces
+
+
 # ---------- HOJAS DE VIDA ----------
-# Las placas de las hojas de vida (VH-01 a VH-05) y las de eventos (VH-06 a VH-10) son la
-# misma flota con códigos distintos. Equivalencia inferida por continuidad del odómetro
-# (mantenimiento vs. eventos en la misma fecha). PENDIENTE DE CONFIRMAR con Gabriela.
-EQUIVALENCIA_PLACAS = {"VH-01": "VH-09", "VH-02": "VH-10", "VH-03": "VH-07",
-                       "VH-04": "VH-06", "VH-05": "VH-08"}
+# Desde la nueva anonimización, las tres fuentes usan el mismo código de camioneta.
+# Se conserva la columna placa_eventos (= placa) por compatibilidad con el resto del código.
 
 # Sistemas afectados en los correctivos (texto libre; una descripción puede tocar varios)
 SISTEMAS_CORRECTIVO = {
@@ -261,6 +416,10 @@ def limpiar_vehiculos(hoja, fecha_corte):
     typos = int(v["carroceria"].astype(str).str.contains("CABIAN").sum())
     v["carroceria"] = v["carroceria"].astype(str).str.strip().str.upper().str.replace("CABIAN", "CABINA", regex=False)
     registrar("vehiculos_typos", f"carrocería con 'CABIAN' corregido a 'CABINA': {typos}")
+    regla("vehiculos", "Carrocería", "b", "Error de digitación ('CABIAN') y un valor truncado ('DOBLE CABINA CON')",
+          "corregir el error de digitación; el truncado se conserva", "No hay forma de saber cómo terminaba el texto truncado; no lo usa ningún objetivo", typos + 1)
+    regla("vehiculos", f"{len(vacias) + len(consts)} columnas", "b", "Columnas vacías (tanque, extintor, facturas) o constantes (marca, línea, modelo, equipamiento)",
+          "eliminar columna", "Las 5 camionetas son Nissan Frontier 2024 con el mismo equipamiento: no diferencian camionetas", len(vacias) + len(consts))
     v["fecha_placa"] = pd.to_datetime(v["fecha_placa"], errors="coerce")
     v["antiguedad_dias"] = (fecha_corte - v["fecha_placa"]).dt.days
     registrar("vehiculos", f"{len(v)} filas x {v.shape[1]} columnas (antigüedad al {fecha_corte.date()})")
@@ -271,7 +430,8 @@ def limpiar_mantenimientos(mant):
     m = mant.rename(columns={
         "Placa": "placa", "Fecha": "fecha", "Descripción": "descripcion", "Tipo": "tipo",
         "Kilometraje acumulado": "km", "Orden de servicio": "orden",
-        "Costo (COP)": "costo", "Prestador del servicio": "prestador"}).copy()
+        "Costo (COP)": "costo", "Prestador del servicio": "prestador",
+        "Orden de servicio formato válido": "orden_formato_valido"}).copy()
     n = len(m)
     m["fecha"] = pd.to_datetime(m["fecha"], dayfirst=True, errors="coerce")
     m["km"], m["costo"] = a_numero(m["km"]), a_numero(m["costo"])
@@ -290,6 +450,30 @@ def limpiar_mantenimientos(mant):
     registrar("visitas", f"{g.ngroups} visitas | con preventivo + correctivo el mismo día: "
                          f"{int(((m['n_filas_visita'] > 1) & m['visita_con_correctivo']).sum() / 2)}")
 
+    # (d) Relaciones que no deberían existir
+    prev_km = m[~m["es_correctivo"]][["placa", "fecha", "km"]].rename(columns={"fecha": "fecha_prev", "km": "km_prev"})
+    x = m[m["es_correctivo"]].reset_index().merge(prev_km, on="placa")
+    x = x[(x["km"] == x["km_prev"]) & (x["fecha"] > x["fecha_prev"])]
+    m["km_copiado"] = m.index.isin(x["index"])
+    regla("mantenimientos", "Kilometraje acumulado", "d", "Correctivos registrados días después de un preventivo con el MISMO km del preventivo",
+          "bandera (km_copiado); el km de esos correctivos no se usa para ubicar la falla en el ciclo",
+          "El km fue copiado del preventivo: la camioneta siguió rodando entre ambas fechas", int(m["km_copiado"].sum()))
+    dup_costo = m.duplicated(["placa", "fecha", "costo"], keep=False) & (m.groupby(["placa", "fecha"])["tipo"].transform("nunique") > 1)
+    m["costo_duplicado"] = dup_costo
+    regla("mantenimientos", "Costo (COP)", "d", "Preventivo y correctivo de la misma visita con exactamente el mismo costo",
+          "bandera (costo_duplicado); se excluyen del análisis de costos por tipo",
+          "Es muy improbable que dos trabajos distintos cuesten lo mismo al peso: probable copia del valor de la factura", int(dup_costo.sum()))
+    os_placas = m.groupby("orden")["placa"].nunique()
+    m["orden_en_varias_placas"] = m["orden"].map(os_placas) > 1
+    regla("mantenimientos", "Orden de servicio", "d", "La misma orden de servicio aparece en dos camionetas distintas",
+          "bandera (orden_en_varias_placas)", "Una orden corresponde a una camioneta; se valida con Abastecimiento y Logística", int(m["orden_en_varias_placas"].sum()))
+    if "orden_formato_valido" in m:
+        malos = int((~m["orden_formato_valido"].astype(bool)).sum())
+        regla("mantenimientos", "Orden de servicio", "a", "Números de orden fuera del patrón de 8 dígitos (9 dígitos o prefijo 'R')",
+              "bandera (orden_formato_valido, calculada antes de anonimizar)", "Errores de digitación; la orden no se usa como variable, solo como llave de visita", malos)
+    regla("mantenimientos", "Prestador del servicio", "b", "El mismo taller escrito de 3 formas distintas",
+          "corregir (normalizado en la anonimización -> Taller 01)", "Sin normalizar, el análisis por taller contaría tres prestadores", int(len(m)))
+
     # Preventivos: km nominal (del texto) e intervalos entre preventivos
     m["km_nominal"] = np.where(~m["es_correctivo"], m["descripcion"].map(_km_nominal), np.nan)
     sin_nominal = int((~m["es_correctivo"] & m["km_nominal"].isna()).sum())
@@ -303,15 +487,25 @@ def limpiar_mantenimientos(mant):
                              f"km entre preventivos (mediana): {prev.groupby('placa')['km'].diff().median():.0f} | "
                              f"días entre preventivos (mediana): {prev.groupby('placa')['fecha'].diff().dt.days.median():.0f}")
     registrar("km", f"decrecientes: {int(m['km_decrece'].sum())}")
+    regla("mantenimientos", "Descripción (preventivo)", "b", "Km nominal con errores de digitación ('65.0.000KM', con y sin espacio)",
+          "corregir (extracción tolerante del km nominal)", "El km nominal define el servicio del plan y el ciclo", typo_nom)
+    salto = prev.groupby("placa")["km"].diff()
+    regla("mantenimientos", "Intervalo entre preventivos", "c", f"Intervalos extremos: {int((salto > 9000).sum())} > 9.000 km (servicio omitido) y "
+          f"{int((salto < 3500).sum())} < 3.500 km (servicio adelantado)", "conservar con bandera en el ciclo",
+          "Son reales: un preventivo omitido es justamente lo que el pronóstico debe ayudar a evitar", int(((salto > 9000) | (salto < 3500)).sum()))
 
     # Correctivos: sistemas afectados (varias banderas por descripción)
     corr = m["es_correctivo"]
-    for sistema, regla in SISTEMAS_CORRECTIVO.items():
-        m[f"corr_{sistema}"] = corr & m["descripcion"].str.lower().str.contains(regla, regex=True)
+    for sistema, patron in SISTEMAS_CORRECTIVO.items():
+        m[f"corr_{sistema}"] = corr & m["descripcion"].str.lower().str.contains(patron, regex=True)
     cols_sis = [f"corr_{s}" for s in SISTEMAS_CORRECTIVO]
     sin_sis = int((corr & ~m[cols_sis].any(axis=1)).sum())
     registrar("correctivos", f"{int(corr.sum())} | sin sistema clasificado: {sin_sis} | "
                              + str({s: int(m[f'corr_{s}'].sum()) for s in SISTEMAS_CORRECTIVO}))
+    multi = int((m[cols_sis].sum(axis=1) > 1).sum())
+    regla("mantenimientos", "Descripción (correctivo)", "b", f"Texto libre sin catálogo de sistemas; {multi} correctivos tocan más de un sistema",
+          "clasificar por palabras clave con etiquetas múltiples (corr_<sistema>)", "Es la base de la variable objetivo por sistema (OA1/OA4); "
+          "queda pendiente validarla con el Champion (F1 >= 0,90)", int(corr.sum()))
     return m
 
 
@@ -356,6 +550,36 @@ def limpiar_plan(plan, m):
     registrar("plan_desv_km", "vs nominal (mediana, p75, max): "
               f"{p['desv_km_vs_nominal'].median():.0f}, {p['desv_km_vs_nominal'].quantile(.75):.0f}, {p['desv_km_vs_nominal'].max():.0f}")
     registrar("plan_fechas", f"fecha programada inválida en origen: {int(p['fecha_prog_invalida'].sum())}")
+
+    # Tipo de discrepancia de cada servicio ejecutado frente a Mantenimientos (preventivo más cercano en km)
+    def discrepancia(r):
+        g = prev[prev["placa"] == r["placa"]]
+        if g.empty or pd.isna(r["km_ejec"]):
+            return pd.Series({"tipo_discrepancia": "sin dato", "km_mant": np.nan, "fecha_mant": pd.NaT})
+        k = g.iloc[(g["km"] - r["km_ejec"]).abs().argsort()[:1]].iloc[0]
+        dkm, ddias = r["km_ejec"] - k["km"], (r["fecha_ejec"] - k["fecha"]).days if pd.notna(r["fecha_ejec"]) else np.nan
+        if dkm == 0 and ddias == 0:
+            t = "coincide"
+        elif dkm == 0 and abs(abs(ddias) - 365) <= 2:
+            t = "error de año en la fecha"
+        elif dkm == 0:
+            t = f"fecha distinta ({ddias:+.0f} d)"
+        elif r["km_ejec"] % 1000 == 0 and abs(dkm) < 3000:
+            t = "km nominal en lugar del real"
+        elif abs(dkm) <= 1000 and sum(a != b for a, b in zip(str(int(r["km_ejec"])), str(int(k["km"])))) == 1:
+            t = "error de un dígito en el km"
+        else:
+            t = "otra"
+        return pd.Series({"tipo_discrepancia": t, "km_mant": k["km"], "fecha_mant": k["fecha"]})
+    p = p.join(p.apply(discrepancia, axis=1))
+    registrar("plan_discrepancias", str(p.loc[p["ejecutado"], "tipo_discrepancia"].value_counts().to_dict()))
+    no_coinc = int((p["ejecutado"] & ~p["tipo_discrepancia"].eq("coincide")).sum())
+    regla("plan", "Km ejecutado / Fecha ejecutada", "d", "El plan no coincide con Mantenimientos (error de un dígito, año errado, km nominal en lugar del real)",
+          "corregir: la hoja Mantenimientos es la fuente de verdad; el plan se usa solo para el estado del servicio",
+          "Mantenimientos se alimenta de la orden de servicio; el plan se digita aparte", no_coinc)
+    regla("plan", "Fecha programada / Km programado", "d", "La fecha programada es casi siempre POSTERIOR a la ejecutada (mediana ~+138 d)",
+          "eliminar columna para el análisis (se usa servicio_km como referencia)", "No es un plan previo: no sirve como objetivo ni como predictor", int(p["fecha_prog_ref"].notna().sum()))
+    regla("plan", "Fecha programada", "a", "Fecha inválida en origen (31/09/2025)", "faltante", "No existe esa fecha", int(p["fecha_prog_invalida"].sum()))
     return p
 
 
@@ -367,7 +591,7 @@ def limpiar_hojas(hv):
 
     # Equivalencia con las placas de eventos (se conserva la placa original de hojas de vida)
     for df in (v, m, p):
-        df["placa_eventos"] = df["placa"].map(EQUIVALENCIA_PLACAS)
+        df["placa_eventos"] = df["placa"]
     m = etiquetar_no_programado(m)
 
     # Control de privacidad
@@ -431,7 +655,36 @@ def _nominal_siguiente(nominal_ult, km_ult):
     return sig
 
 
-def unir_ultimo_preventivo(diario, m):
+def unir_fuentes_diarias(ev_dia, vj_dia):
+    """Tabla camioneta x día con las dos fuentes de telemetría.
+    km_dia: se toma de los viajes cuando el día tiene dato de viajes (fuente directa);
+    si no, de la diferencia del odómetro de los eventos (fuente indirecta)."""
+    d = ev_dia.rename(columns={"km_dia": "km_dia_eventos"})
+    if vj_dia is not None:
+        d = d.merge(vj_dia, on=["placa", "fecha"], how="outer")
+        d["dia_con_eventos"] = d["dia_con_eventos"].fillna(False).astype(bool)
+        usar_viajes = d["estado_dia"].isin(["con viajes", "sin uso"])
+        d["km_dia"] = np.where(usar_viajes, d["km_dia_viajes"], d["km_dia_eventos"])
+        d["fuente_km_dia"] = np.select([usar_viajes.to_numpy(bool), d["km_dia_eventos"].notna().to_numpy(bool)], ["viajes", "eventos"], "sin dato")
+    else:
+        d["km_dia"], d["fuente_km_dia"] = d["km_dia_eventos"], np.where(d["km_dia_eventos"].notna(), "eventos", "sin dato")
+    excesivo = d["km_dia"] > MAX_KM_DIA
+    d.loc[excesivo, "km_dia"] = np.nan
+    regla("tabla diaria", "km_dia", "a", f"km/día > {MAX_KM_DIA} (imposible en la operación del contrato)", "faltante",
+          "Corresponde a acumulación de km de un hueco de datos, no a un día real", int(excesivo.sum()))
+    d = d.sort_values(["placa", "fecha"]).reset_index(drop=True)
+    cob = d.groupby("placa")["fuente_km_dia"].value_counts(normalize=True).unstack(fill_value=0).round(3)
+    registrar("km_dia_fuente", "proporción de días por fuente de km/día: " + str(cob.to_dict(orient="index")))
+    ambos = d.dropna(subset=["km_dia_viajes", "km_dia_eventos"])
+    ambos = ambos[ambos["estado_dia"] == "con viajes"]
+    if len(ambos):
+        r = ambos[["km_dia_viajes", "km_dia_eventos"]].corr().iloc[0, 1]
+        registrar("km_dia_fuentes_concordancia", f"días con ambas fuentes: {len(ambos)} | correlación: {r:.3f} | "
+                  f"diferencia mediana: {(ambos['km_dia_eventos'] - ambos['km_dia_viajes']).median():.1f} km")
+    return d
+
+
+def unir_ultimo_preventivo(diario, m, factor=None):
     """A cada camioneta-día le pega el último preventivo (y el siguiente real, como objetivo del pronóstico)."""
     prev = (m[~m["es_correctivo"]].drop_duplicates(["placa", "fecha"])
               .dropna(subset=["placa_eventos"])
@@ -450,13 +703,11 @@ def unir_ultimo_preventivo(diario, m):
                       direction="forward", allow_exact_matches=False)
     d = d.sort_values(["placa", "fecha"]).reset_index(drop=True)
 
-    # Las dos fuentes de km (hojas vs. eventos) difieren 400-1.500 km: se estima un desfase por camioneta
-    # con los días en que hubo mantenimiento y odómetro de eventos, y se expresa el km de eventos en la escala de las hojas.
-    coinc = d.merge(prev[["placa", "fecha", "km"]], on=["placa", "fecha"], how="inner").dropna(subset=["odo_interp"])
-    offset = (coinc["odo_interp"] - coinc["km"]).groupby(coinc["placa"]).median()
-    d["offset_odo"] = d["placa"].map(offset)
-    d["km_hojas_estimado"] = d["odo_interp"] - d["offset_odo"]
-    registrar("desfase_km", "mediana (km eventos - km hojas) por camioneta: " + str({k: int(v) for k, v in offset.items()}))
+    # El odómetro GPS queda por debajo del km del taller; se lleva a la escala del taller con el
+    # factor por camioneta (ver factor_odometro). Se usa el odómetro de los viajes si existe ese día.
+    odo_gps = d["odo_ini_viajes"].combine_first(d["odo_interp"]) if "odo_ini_viajes" in d else d["odo_interp"]
+    d["factor_odo"] = d["placa"].map(factor) if factor is not None else 1.0
+    d["km_hojas_estimado"] = odo_gps * d["factor_odo"]
 
     d["dias_desde_prev"] = (d["fecha"] - d["fecha_ult_prev"]).dt.days
     d["km_desde_prev"] = d["km_hojas_estimado"] - d["km_ult_prev"]
@@ -468,7 +719,7 @@ def unir_ultimo_preventivo(diario, m):
     d["objetivo_censurado"] = d["fecha_prox_prev"].isna()
 
     util = d["km_desde_prev"].notna()
-    registrar("km_desde_prev_calidad", f"negativos (error del desfase, <= 400 km): {int((d['km_desde_prev'] < 0).sum())} | "
+    registrar("km_desde_prev_calidad", f"negativos (error residual del factor): {int((d['km_desde_prev'] < 0).sum())} | "
                                        f"> 12.000 km (ciclos largos o servicio omitido): {int((d['km_desde_prev'] > 12000).sum())}")
     registrar("diario_prev", f"{len(d)} camioneta-días | con km desde el último preventivo: {int(util.sum())} | "
                              f"con objetivo real (siguiente preventivo conocido): {int((~d['objetivo_censurado'] & util).sum())} | "
@@ -565,32 +816,37 @@ def reducir_dimensiones(diario):
     return cargas, pares
 
 
-def importancia_variables(ciclos):
-    """Técnica 8 (exploratoria): ¿qué variables de telemetría acompañan al uso (km/día) de cada ciclo?"""
-    base = ciclos[ciclos["ciclo_con_telemetria"] & ~ciclos["abierto"]].dropna(subset=["km_dia_ciclo"]).copy()
-    feats = ["km_dia_tel", "volt_min", "volt_medio", "n_alertas_volt", "n_desconexion_bateria", "n_sin_cobertura",
-             "n_ralenti_excesivo", "ralenti_h_dia", "pct_sin_gps", "n_conductores", "n_correctivos_intervalo"]
-    feats = [c for c in feats if c in base.columns and base[c].notna().sum() > 3 and base[c].nunique() > 1]
-    sp = base[feats + ["km_dia_ciclo"]].corr(method="spearman")["km_dia_ciclo"].drop("km_dia_ciclo")
-    out = pd.DataFrame({"spearman_con_km_dia_ciclo": sp.round(3), "n": [int(base[c].notna().sum()) for c in sp.index]})
-    out["importancia_rf"] = np.nan
-    msg = f"ciclos usados: {len(base)} (exploratorio, sin conclusiones causales)"
-    try:
-        from sklearn.ensemble import RandomForestRegressor
-        from sklearn.model_selection import GroupKFold, cross_val_predict
-        fs = [c for c in feats if c != "km_dia_tel"]          # km_dia_tel es casi el mismo dato que el objetivo
-        Xr, y = base[fs].fillna(base[fs].median()), base["km_dia_ciclo"]
-        rf = RandomForestRegressor(n_estimators=300, min_samples_leaf=3, random_state=0)
-        out.loc[fs, "importancia_rf"] = rf.fit(Xr, y).feature_importances_.round(3)
-        if base["placa"].nunique() >= 3:
-            pred = cross_val_predict(rf, Xr, y, cv=GroupKFold(n_splits=min(5, base["placa"].nunique())), groups=base["placa"])
-            mae_rf, mae_med = float(np.abs(y - pred).mean()), float(np.abs(y - y.median()).mean())
-            msg += f" | MAE validación por camioneta: RF {mae_rf:.1f} vs mediana {mae_med:.1f} km/día"
-    except ImportError:
-        msg += " | scikit-learn no disponible: solo correlaciones"
-    registrar("importancia", msg)
-    registrar("importancia_top", str(out["spearman_con_km_dia_ciclo"].abs().sort_values(ascending=False).head(4).round(2).to_dict()))
-    return out.sort_values("spearman_con_km_dia_ciclo", key=lambda s: s.abs(), ascending=False)
+def importancia_variables(diario, ciclos):
+    """Técnica 8 (exploratoria): ¿qué variables acompañan a la señal que se quiere vigilar?
+    - OA3 (batería): correlación de Spearman, a nivel camioneta-día, entre el voltaje (y las alertas)
+      y el uso del día (km, viajes cortos, horas de conducción, ralentí).
+    - OA4 (riesgo): con 19 correctivos y 3 fallas no programadas no hay muestra para estimar
+      importancias; solo se describe la relación entre uso del ciclo y número de correctivos.
+    No se entrena ningún modelo: la Guía 4 pide entender los datos, no modelarlos, y con
+    5 camionetas un modelo sobreajustaría (riesgo 7.2.1 de la Guía 3)."""
+    d = diario.copy()
+    cols_alerta = [c for c in d.columns if c.startswith("n_dlp_alerta")]
+    d["n_alertas_voltaje"] = d[cols_alerta].sum(axis=1) if cols_alerta else np.nan
+    d["ralenti_h"] = d.get("duracion_ralenti_s", np.nan) / 3600
+    candidatas = ["km_dia", "n_viajes", "n_viajes_cortos", "horas_conduccion", "ralenti_h", "n_ec_ralenti_excesivo"]
+    candidatas = [c for c in candidatas if c in d.columns]
+    filas = []
+    for objetivo in ("voltaje_min", "voltaje_medio", "n_alertas_voltaje"):
+        base = d[d["dia_con_eventos"]].dropna(subset=[objetivo])
+        for c in candidatas:
+            par = base[[objetivo, c]].dropna()
+            if len(par) > 30 and par[c].nunique() > 1:
+                filas.append({"objetivo": objetivo, "variable": c, "spearman": round(par.corr(method="spearman").iloc[0, 1], 3), "n_dias": len(par)})
+    out = pd.DataFrame(filas)
+    cerr = ciclos[~ciclos["abierto"]].dropna(subset=["km_dia_ciclo"])
+    if len(cerr) > 10:
+        for c in ("km_dia_ciclo", "dias", "ralenti_h_dia"):
+            if c in cerr and cerr[c].nunique() > 1:
+                rho = cerr[[c, "n_correctivos_intervalo"]].corr(method="spearman").iloc[0, 1]
+                out = pd.concat([out, pd.DataFrame([{"objetivo": "n_correctivos_ciclo", "variable": c, "spearman": round(rho, 3), "n_dias": len(cerr)}])])
+    registrar("importancia", "Spearman (exploratorio, sin conclusiones causales): " +
+              "; ".join(f"{r.objetivo}~{r.variable}={r.spearman:+.2f}" for r in out.itertuples() if abs(r.spearman) >= 0.2))
+    return out.sort_values("spearman", key=lambda s_: s_.abs(), ascending=False).reset_index(drop=True)
 
 
 def segmentar_camionetas(diario, ev, ciclos, m):
@@ -601,8 +857,14 @@ def segmentar_camionetas(diario, ev, ciclos, m):
         e = ev[ev["placa"] == pe]
         c = cerr[cerr["placa"] == pe]
         corr = m[m["placa_eventos"].eq(pe) & m["es_correctivo"]]
+        gv = g[g.get("fuente_km_dia", pd.Series("eventos", index=g.index)).eq("viajes")] if "fuente_km_dia" in g else g
+        cols_alerta = [c for c in g.columns if c.startswith("n_dlp_alerta")]
         rows.append({"placa": pe, "dias_con_eventos": int(g["dia_con_eventos"].sum()),
-                     "km_dia_mediana": g["km_dia"].median(), "cobertura_km_dia": g["km_dia"].notna().mean(),
+                     "km_dia_mediana": g["km_dia"].median(), "km_dia_mediana_viajes": gv["km_dia"].median() if len(gv) else np.nan,
+                     "cobertura_km_dia": g["km_dia"].notna().mean(),
+                     "viajes_cortos_pct": g["n_viajes_cortos"].sum() / g["n_viajes"].sum() if "n_viajes" in g and g["n_viajes"].sum() else np.nan,
+                     "alertas_voltaje": int(g[cols_alerta].sum().sum()) if cols_alerta else np.nan,
+                     "desconexiones_bateria": int(g["n_dlp_desconexion_bateria"].sum()) if "n_dlp_desconexion_bateria" in g else np.nan,
                      "n_conductores": e["conductor"].nunique(), "pct_sin_gps": e["sin_gps_inicio"].mean(),
                      "ralenti_h_dia": g["duracion_ralenti_s"].sum() / 3600 / max(int(g["dia_con_eventos"].sum()), 1),
                      "volt_mediano_mv": g["voltaje_medio"].median(),
@@ -617,33 +879,48 @@ def segmentar_camionetas(diario, ev, ciclos, m):
 
 def main():
     ev = limpiar_eventos(cargar_eventos())
-    diario = agregar_eventos_dia(ev)
+    ev_dia = agregar_eventos_dia(ev)
+    vj = cargar_viajes()
+    vj_dia = None
+    if vj is not None:
+        vj = limpiar_viajes(vj)
+        vj_dia = agregar_viajes_dia(vj)
+    else:
+        registrar("viajes", "no se encontró el Daily Movement Report anonimizado")
+    diario = unir_fuentes_diarias(ev_dia, vj_dia)
     m, p, v = limpiar_hojas(cargar_hojas())
     cruce(ev, v, m)
 
-    # Etiqueta, ciclos y unión con el último preventivo
-    diario_prev = unir_ultimo_preventivo(diario, m)
+    factor, cruces_odo = factor_odometro(vj_dia, ev_dia, m)
+    diario_prev = unir_ultimo_preventivo(diario, m, factor)
+    regla("tabla diaria", "Variables del día", "d", "Riesgo de fuga de información: usar datos posteriores a la fecha de la alerta",
+          "construcción solo con información hasta el día (último preventivo hacia atrás); el próximo preventivo se guarda como objetivo aparte",
+          "Una variable que se conoce después de la decisión da buenos resultados en la prueba pero no sirve en producción", len(diario_prev))
     ciclos = construir_ciclos(m, diario, ev)
-    # Técnicas de entendimiento
     cargas, pares = reducir_dimensiones(diario)
-    importancia = importancia_variables(ciclos)
+    importancia = importancia_variables(diario, ciclos)
     segmentos = segmentar_camionetas(diario, ev, ciclos, m)
     RESULTADOS.update(ciclos=ciclos, diario_prev=diario_prev, pca_cargas=cargas, correlaciones_altas=pares,
-                      importancia=importancia, segmentos=segmentos)
+                      importancia=importancia, segmentos=segmentos, viajes=vj, cruces_odometro=cruces_odo,
+                      factor_odometro=factor)
 
     ev.to_csv(OUT_DIR / "eventos_limpios.csv", index=False)
-    diario.to_csv(OUT_DIR / "eventos_por_placa_dia.csv", index=False)
+    diario.to_csv(OUT_DIR / "tabla_diaria.csv", index=False)
     diario_prev.to_csv(OUT_DIR / "tabla_diaria_con_preventivo.csv", index=False)
     ciclos.to_csv(OUT_DIR / "ciclos_camioneta.csv", index=False)
     m.to_csv(OUT_DIR / "mantenimientos_limpios.csv", index=False)
     p.to_csv(OUT_DIR / "plan_limpio.csv", index=False)
     v.to_csv(OUT_DIR / "vehiculos.csv", index=False)
-    # Resultados agregados de las técnicas (pequeños, sin datos crudos): sí se versionan en docs/
+    if vj is not None:
+        vj.to_csv(OUT_DIR / "viajes_limpios.csv", index=False)
+    # Resultados agregados (pequeños, sin datos fila a fila): sí se versionan en docs/
     cargas.rename_axis("variable").to_csv(DOCS_DIR / "pca_telemetria.csv")
     pares.to_csv(DOCS_DIR / "correlaciones_altas.csv", index=False)
-    importancia.rename_axis("variable").to_csv(DOCS_DIR / "importancia_variables.csv")
+    importancia.to_csv(DOCS_DIR / "importancia_variables.csv", index=False)
     segmentos.to_csv(DOCS_DIR / "segmentos_camioneta.csv", index=False)
+    cruces_odo.groupby("placa").agg(n=("factor", "size"), factor=("factor", "median"), sesgo_pct=("sesgo_pct", "median")).round(4).to_csv(DOCS_DIR / "factor_odometro.csv")
     pd.DataFrame(LOG).to_csv(DOCS_DIR / "log_preprocesamiento.csv", index=False)
+    pd.DataFrame(REGLAS).to_csv(DOCS_DIR / "reglas_limpieza.csv", index=False)
     return ev, m, p, v, diario
 
 

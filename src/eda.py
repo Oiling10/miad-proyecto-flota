@@ -11,13 +11,15 @@ eda.py - Funciones de apoyo para el EDA del proyecto "Predicción de fallas en f
                                       grafico_linea_tiempo_mtto
     3. EDA del Detailed Event Report  convertir_tipos_eventos, valores_centinela, voltaje_en_cero, reporte_duplicados_eventos,
                                       cortes_red_gemelos, revisar_confidencialidad, eliminar_identificadores,
-                                      equivalencia_placas_mascarada, cobertura_temporal, hueco_mas_largo,
+                                      cobertura_temporal, hueco_mas_largo,
                                       grafico_eventos_mensuales, catalogo_eventos, resumen_eventos_bateria,
                                       resumen_duracion, grafico_duracion, resumen_ralenti, grafico_ralenti,
                                       resumen_voltaje, grafico_voltaje_diario, serie_voltaje_mensual,
                                       correctivos_bateria, grafico_bateria_camioneta, resumen_odometro,
                                       grafico_odometro, resumen_conductores, resumen_ubicacion, resumen_red,
                                       comparar_llaves
+    4. Viajes e integración ......... ruta_viajes, leer_viajes, resumen_viajes, estado_dias, grafico_km_dia,
+                                      uso_vs_bateria, grafico_uso_vs_bateria
 
 Convenciones:
     - "hojas" es el diccionario {"Vehículos": df, "Mantenimientos": df, "Plan de mantenimiento": df}.
@@ -654,58 +656,30 @@ def _columnas_identificadores():
 
 
 def revisar_confidencialidad(ev):
-    """Revisa si el archivo 'anonimizado' aún contiene placas reales o identificadores. NO imprime valores.
+    """Verifica que el archivo anonimizado NO contenga placas reales. NO imprime valores.
 
-    Busca en AssetName un texto con formato de placa colombiana (3 letras + 3 dígitos) y lista las columnas
-    con identificadores (que se deben eliminar) y las que conviene revisar con el equipo.
+    Busca en TODAS las columnas de texto un patrón de placa colombiana (3 letras + 3 dígitos,
+    con o sin guion). Con la anonimización corregida (src/anonimizar.py) el resultado debe ser 0.
 
     Devuelve
     -------
-    dict : {"filas_con_placa_real": int, "placas_distintas": int,
-            "identificadores": DataFrame (columna, valores únicos, descripción),
-            "a_revisar_con_el_equipo": DataFrame}
+    dict : {"filas_con_placa_real": int, "columnas_con_placa": list, "codigos_camioneta": list}
     """
-    ident, revisar = _columnas_identificadores()
-    placa = ev["AssetName"].astype("string").str.extract(r"^([A-Z]{3}-?\d{3})")[0]
-    return {"filas_con_placa_real": int(placa.notna().sum()), "placas_distintas": int(placa.nunique()),
-            "identificadores": pd.DataFrame([{"columna": k, "únicos": ev[k].nunique(), "descripción": v}
-                                             for k, v in ident.items() if k in ev.columns]).set_index("columna"),
-            "a_revisar_con_el_equipo": pd.DataFrame({"descripción": revisar})}
+    patron = r"(?<![A-Za-z0-9])[A-Za-z]{3}-?\d{3}(?![0-9])"
+    cols, filas = [], pd.Series(False, index=ev.index)
+    for c in ev.columns:
+        if ev[c].dtype == object or pd.api.types.is_string_dtype(ev[c]):
+            hit = ev[c].astype("string").str.contains(patron, regex=True, na=False)
+            if hit.any():
+                cols.append(c)
+                filas |= hit
+    return {"filas_con_placa_real": int(filas.sum()), "columnas_con_placa": cols,
+            "codigos_camioneta": sorted(ev["AssetExtra"].dropna().unique())}
 
 
 def eliminar_identificadores(ev):
-    """Elimina de la copia de trabajo las columnas con identificadores (AssetName, AssetID, AssetID2, AssetExtra2).
-
-    Después de llamarla ya no queda ninguna placa real en memoria, ni en los outputs del notebook.
-
-    Devuelve
-    -------
-    DataFrame : copia de ev sin esas columnas.
-    """
-    ident, _ = _columnas_identificadores()
-    return ev.drop(columns=[c for c in ident if c in ev.columns])
-
-
-def equivalencia_placas_mascarada(raw, mostrar_completo=False):
-    """Tabla de equivalencia AssetExtra (VH-NN) <-> AssetName, enmascarada por defecto (ej.: N**-***_...).
-
-    Parámetros
-    ----------
-    raw : DataFrame  (eventos crudos, con AssetName)
-    mostrar_completo : bool
-        True solo para verlo uno mismo; NO dejar guardado el output en el notebook.
-
-    Devuelve
-    -------
-    DataFrame
-    """
-    def enmascarar(s):
-        return re.sub(r"([A-Z]{3})(-?)(\d{3})", lambda m: m.group(1)[0] + "**" + m.group(2) + "***", s)
-
-    eq = raw[["AssetExtra", "AssetName"]].drop_duplicates().sort_values("AssetExtra").reset_index(drop=True)
-    if not mostrar_completo:
-        eq["AssetName"] = eq["AssetName"].map(enmascarar)
-    return eq
+    """Compatibilidad: la anonimización ya elimina los identificadores; devuelve una copia de ev."""
+    return ev.copy()
 
 
 def cobertura_temporal(ev):
@@ -734,7 +708,7 @@ def hueco_mas_largo(ev, camioneta):
 
     Parámetros
     ----------
-    camioneta : str  (por ejemplo "VH-08")
+    camioneta : str  (por ejemplo "VH-05")
 
     Devuelve
     -------
@@ -934,7 +908,7 @@ def serie_voltaje_mensual(ev, camioneta):
 
     Parámetros
     ----------
-    camioneta : str  (código de telemetría, por ejemplo "VH-07")
+    camioneta : str  (código de la camioneta, por ejemplo "VH-03")
 
     Devuelve
     -------
@@ -954,11 +928,11 @@ def serie_voltaje_mensual(ev, camioneta):
 def correctivos_bateria(mtto, equivalencia):
     """Correctivos de batería del consolidado, con la placa equivalente en la telemetría.
 
-    Usa la equivalencia de placas inferida por continuidad del odómetro (PROVISIONAL: pendiente de confirmar).
+    Las tres fuentes comparten el código de camioneta; la equivalencia es la identidad.
 
     Parámetros
     ----------
-    equivalencia : dict  {placa_hojas: placa_telemetria}, p. ej. preprocesamiento.EQUIVALENCIA_PLACAS
+    equivalencia : dict  {placa_hojas: placa_telemetria}; con la anonimización actual {VH-0n: VH-0n}
 
     Devuelve
     -------
@@ -1155,3 +1129,85 @@ def comparar_llaves(ev, mtto, equivalencia=None):
     return {"placas_telemetria": p_gps, "placas_consolidado": p_m, "en_ambos": sorted(set(p_gps) & set(p_m)),
             "con_equivalencia": eq, "traslape": f"{ini.date()} → {fin.date()} ({(fin - ini).days} días)",
             "mantenimientos_en_traslape": int(en.sum()), "correctivos_en_traslape": int((en & mtto["es_corr"]).sum())}
+
+
+# =====================================================================================================
+# 4. EDA DEL DAILY MOVEMENT REPORT (VIAJES) E INTEGRACIÓN DE FUENTES
+# =====================================================================================================
+def ruta_viajes(data=None):
+    """Ruta del Daily Movement Report anonimizado."""
+    data = Path(data) if data else localizar_datos()
+    return data / "Daily Movement Report_anonimizado.csv"
+
+
+def leer_viajes(ruta):
+    """Lee el Daily Movement Report TAL COMO VIENE (números con coma de miles como texto)."""
+    return pd.read_csv(ruta, dtype=str, encoding="utf-8-sig")
+
+
+def resumen_viajes(vj_raw):
+    """Tamaño, periodo, columnas vacías/constantes y duplicados del reporte de viajes."""
+    fecha = pd.to_datetime(vj_raw["DepartureDate"], format="%d/%m/%Y", errors="coerce")
+    unicos = vj_raw.nunique(dropna=True)
+    return {"filas": len(vj_raw), "columnas": vj_raw.shape[1],
+            "periodo": f"{fecha.min():%d/%m/%Y} → {fecha.max():%d/%m/%Y}",
+            "vacias": unicos[unicos == 0].index.tolist(),
+            "constantes": unicos[unicos == 1].index.tolist(),
+            "duplicados": int(vj_raw.duplicated(["AssetExtra", "DepartureDate", "DepartureTime", "StartOdoMeter"]).sum()),
+            "viajes_por_camioneta": vj_raw["AssetExtra"].value_counts().sort_index()}
+
+
+def estado_dias(vj_dia):
+    """Días por estado (con viajes / sin uso / sin dato) y km/día por camioneta."""
+    estados = vj_dia.groupby("placa")["estado_dia"].value_counts().unstack(fill_value=0)
+    km = vj_dia[vj_dia["estado_dia"] != "sin dato"].groupby("placa")["km_dia_viajes"].describe()[["mean", "50%", "max"]]
+    return estados.join(km.round(1).rename(columns={"mean": "km_dia_media", "50%": "km_dia_mediana", "max": "km_dia_max"}))
+
+
+def grafico_km_dia(vj_dia):
+    """km/día por camioneta (días con dato); los días 'sin dato' se marcan abajo en rojo."""
+    c = colores()
+    placas = sorted(vj_dia["placa"].unique())
+    fig, ejes = plt.subplots(len(placas), 1, sharex=True, figsize=(10, 1.5 * len(placas)))
+    for a, pl in zip(ejes, placas):
+        g = vj_dia[vj_dia["placa"] == pl]
+        a.plot(g["fecha"], g["km_dia_viajes"], color=c["gris"], linewidth=0.9)
+        sd = g[g["estado_dia"] == "sin dato"]
+        a.scatter(sd["fecha"], np.zeros(len(sd)), s=6, color=c["acento"], label="sin dato")
+        a.set_ylabel(pl, rotation=0, ha="right", va="center")
+    ejes[0].set_title("km por día según los viajes · puntos rojos: días sin dato (hueco del GPS, no inactividad)")
+    fig.tight_layout()
+    plt.close(fig)
+    return fig
+
+
+def uso_vs_bateria(diario):
+    """Perfil por camioneta: uso (km/día, % de viajes cortos) frente a la condición eléctrica
+    (voltaje mediano, alertas y desconexiones por cada 1.000 km). Relación, no causalidad."""
+    cols_alerta = [c for c in diario.columns if c.startswith("n_dlp_alerta")]
+    g = diario.groupby("placa")
+    out = pd.DataFrame({
+        "km_dia_mediana": g["km_dia"].median(),
+        "pct_viajes_cortos": (g["n_viajes_cortos"].sum() / g["n_viajes"].sum() * 100) if "n_viajes" in diario else np.nan,
+        "voltaje_mediano_v": g["voltaje_medio"].median() / 1000,
+        "alertas_voltaje": diario.groupby("placa")[cols_alerta].sum().sum(axis=1),
+        "desconexiones": g["n_dlp_desconexion_bateria"].sum() if "n_dlp_desconexion_bateria" in diario else np.nan,
+        "km_total": g["km_dia"].sum(),
+    })
+    out["alertas_por_1000km"] = out["alertas_voltaje"] / out["km_total"] * 1000
+    return out.round(2)
+
+
+def grafico_uso_vs_bateria(perfil):
+    """Dispersión km/día mediano vs. alertas de voltaje por 1.000 km (una burbuja por camioneta)."""
+    c = colores()
+    fig, a = plt.subplots(figsize=(6, 3.8))
+    a.scatter(perfil["km_dia_mediana"], perfil["alertas_por_1000km"], s=80, color=c["gris"], edgecolor=c["tinta"])
+    for pl, r in perfil.iterrows():
+        a.annotate(pl, (r["km_dia_mediana"], r["alertas_por_1000km"]), xytext=(6, 4), textcoords="offset points", fontsize=9)
+    a.set_xlabel("km por día (mediana)")
+    a.set_ylabel("Alertas de voltaje por 1.000 km")
+    a.set_title("Uso de la camioneta frente a alertas de batería")
+    fig.tight_layout()
+    plt.close(fig)
+    return fig

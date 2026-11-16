@@ -1,22 +1,26 @@
 paso,detalle
-columnas,eliminadas 20 (incluye AssetName) -> 24 restantes
+columnas,eventos: 30 -> 15 columnas
 duplicados,213221 -> 213221 filas (EventKey único)
 fechas,inicio inválido: 0 | fin < inicio: 0
 duracion,> 1 h: 13829 | > 24 h: 35 | atípicas (p99.9 por evento): 213
 odometro,lecturas reales: 46398 (21.8%) | retrocesos: 0
-voltaje,lecturas: 21532 | en 0 mV: 658
-coord_ini,fuera de rango: 0
-coord_fin,fuera de rango: 0
-coord_imputadas,fin: 65893 | inicio: 20888 | sin ninguna: 19121
-final_eventos,213221 filas x 30 columnas
+voltaje,promedios: 18889 | en 0 mV (-> faltante): 570 | > 16 V (-> faltante): 0 | alertas con valor: 2643
+ubicacion,eventos sin posición (región 'Sin dato'): 40009 (18.8%)
+final_eventos,213221 filas x 18 columnas
 diario,2038 camioneta-días | sin eventos: 173
 km_dia,con dato: 1656 | interpolados (huecos <= 7 d): 29
-odo_cobertura,VH-06: km_dia con dato en 98% de 410 días
-odo_cobertura,VH-07: km_dia con dato en 98% de 410 días
-odo_cobertura,VH-08: km_dia con dato en 13% de 399 días
-odo_cobertura,VH-09: km_dia con dato en 98% de 410 días
-odo_cobertura,VH-10: km_dia con dato en 98% de 409 días
-vehiculos_columnas,43 originales | vacías: 6 | constantes: 32
+odo_cobertura,VH-01: km_dia con dato en 98% de 410 días
+odo_cobertura,VH-02: km_dia con dato en 98% de 409 días
+odo_cobertura,VH-03: km_dia con dato en 98% de 410 días
+odo_cobertura,VH-04: km_dia con dato en 98% de 410 días
+odo_cobertura,VH-05: km_dia con dato en 13% de 399 días
+viajes_consistencia,"viajes con |distancia - (odo fin - odo ini)| > 0,1 km: 0 de 9580"
+viajes_huecos,"saltos de odómetro > 1.0 km entre viajes: 7 (suman 6,417 km) | retrocesos: 0"
+viajes,9589 -> 9580 filas | 30 -> 26 columnas | periodo 2026-05-22 a 2026-10-22
+viajes_dia,"días por estado y camioneta: {'VH-01': {'con viajes': 135, 'sin dato': 0, 'sin uso': 19}, 'VH-02': {'con viajes': 154, 'sin dato': 0, 'sin uso': 0}, 'VH-03': {'con viajes': 147, 'sin dato': 5, 'sin uso': 2}, 'VH-04': {'con viajes': 154, 'sin dato': 0, 'sin uso': 0}, 'VH-05': {'con viajes': 67, 'sin dato': 80, 'sin uso': 7}}"
+km_dia_fuente,"proporción de días por fuente de km/día: {'VH-01': {'eventos': 0.602, 'sin dato': 0.022, 'viajes': 0.376}, 'VH-02': {'eventos': 0.604, 'sin dato': 0.02, 'viajes': 0.377}, 'VH-03': {'eventos': 0.615, 'sin dato': 0.022, 'viajes': 0.363}, 'VH-04': {'eventos': 0.6, 'sin dato': 0.024, 'viajes': 0.376}, 'VH-05': {'eventos': 0.035, 'sin dato': 0.779, 'viajes': 0.185}}"
+km_dia_fuentes_concordancia,días con ambas fuentes: 623 | correlación: 0.991 | diferencia mediana: 0.6 km
+vehiculos_columnas,33 originales | vacías: 4 | constantes: 24
 vehiculos_typos,carrocería con 'CABIAN' corregido a 'CABINA': 1
 vehiculos,5 filas x 6 columnas (antigüedad al 2026-09-14)
 mantenimientos,117 -> 117 filas | nulos: 0
@@ -29,18 +33,18 @@ plan,"filas: 105 | {'ejecutado': 98, 'pendiente': 4, 'omitido': 2, 'conflicto_pl
 conciliacion,plan ejecutado con preventivo el mismo día: 94.9% | mismo km: 89.8% | mismo servicio nominal: 92.9%
 plan_desv_km,"vs nominal (mediana, p75, max): 1166, 1758, 4250"
 plan_fechas,fecha programada inválida en origen: 1
+plan_discrepancias,"{'coincide': 88, 'error de un dígito en el km': 3, 'error de año en la fecha': 2, 'km nominal en lugar del real': 2, 'fecha distinta (-2 d)': 1, 'fecha distinta (-1 d)': 1, 'otra': 1}"
 no_programado,3 de 19 correctivos a más de 3 d de un preventivo (16%); en la misma visita del preventivo: 13
 no_programado_sensibilidad,"% de correctivos a más de X días de un preventivo: {0: '32%', 1: '16%', 3: '16%', 5: '11%', 7: '11%', 15: '5%'}"
 no_programado_baseline,"Las guías reportan 70 % (270 de 384, flota completa 2025); esta muestra son 5 camionetas y 19 correctivos: no es comparable"
 cruce,vehiculos (por equivalencia): 5 de 5 placas de eventos (100%)
 cruce,mantenimientos (por equivalencia): 5 de 5 placas de eventos (100%)
-desfase_km,"mediana (km eventos - km hojas) por camioneta: {'VH-06': -489, 'VH-07': -1229, 'VH-08': -1352, 'VH-09': -559, 'VH-10': -1492}"
-km_desde_prev_calidad,"negativos (error del desfase, <= 400 km): 35 | > 12.000 km (ciclos largos o servicio omitido): 10"
-diario_prev,2038 camioneta-días | con km desde el último preventivo: 1664 | con objetivo real (siguiente preventivo conocido): 1316 | censurados: 365
+factor_odometro,"sesgo GPS vs. taller (% mediano, n): {('VH-01', 'eventos'): {'median': -1.22, 'count': 3}, ('VH-01', 'viajes'): {'median': -1.34, 'count': 1}, ('VH-02', 'eventos'): {'median': -1.36, 'count': 8}, ('VH-02', 'viajes'): {'median': -1.45, 'count': 2}, ('VH-03', 'eventos'): {'median': -1.39, 'count': 8}, ('VH-03', 'viajes'): {'median': -1.49, 'count': 3}, ('VH-04', 'eventos'): {'median': -0.53, 'count': 9}, ('VH-04', 'viajes'): {'median': -0.8, 'count': 3}, ('VH-05', 'eventos'): {'median': -1.38, 'count': 1}, ('VH-05', 'viajes'): {'median': -1.5, 'count': 1}}"
+km_desde_prev_calidad,negativos (error residual del factor): 20 | > 12.000 km (ciclos largos o servicio omitido): 12
+diario_prev,2038 camioneta-días | con km desde el último preventivo: 1696 | con objetivo real (siguiente preventivo conocido): 1348 | censurados: 365
 ciclos,"97 ciclos (93 cerrados, 4 abiertos) | con telemetría >= 80%: 28 | con falla no programada: 3"
 ciclos_km,km por ciclo (mediana): 5356 | días (mediana): 43 | km/día (mediana): 124.2
-pca,"17 variables diarias | faltantes rellenados con la mediana: 2.3% | componentes para 90 % de la varianza: 7 | PC1-3: [0.361, 0.189, 0.12]"
+pca,"20 variables diarias | faltantes rellenados con la mediana: 8.5% | componentes para 90 % de la varianza: 8 | PC1-3: [0.356, 0.197, 0.104]"
 correlaciones_altas,2 pares con |r| > 0.9: n_dlp_desconexion_bateria~n_obc_unit_reset; n_dlp_no_gsm_coverage~odo_lecturas
-importancia,"ciclos usados: 24 (exploratorio, sin conclusiones causales) | MAE validación por camioneta: RF 30.1 vs mediana 21.8 km/día"
-importancia_top,"{'km_dia_tel': 0.99, 'n_ralenti_excesivo': 0.56, 'ralenti_h_dia': 0.43, 'n_desconexion_bateria': 0.3}"
-segmentos,"{'VH-06': 'alto', 'VH-07': 'alto', 'VH-08': 'medio', 'VH-09': 'bajo', 'VH-10': 'alto'} (alto >= 100 km/día, bajo < 50)"
+importancia,"Spearman (exploratorio, sin conclusiones causales): voltaje_medio~km_dia=+0.27; voltaje_medio~horas_conduccion=+0.21; n_alertas_voltaje~km_dia=+0.24; n_alertas_voltaje~n_viajes=+0.29; n_alertas_voltaje~n_viajes_cortos=+0.27; n_alertas_voltaje~horas_conduccion=+0.25; n_alertas_voltaje~ralenti_h=+0.20; n_correctivos_ciclo~km_dia_ciclo=-0.24"
+segmentos,"{'VH-01': 'bajo', 'VH-02': 'alto', 'VH-03': 'alto', 'VH-04': 'alto', 'VH-05': 'medio'} (alto >= 100 km/día, bajo < 50)"

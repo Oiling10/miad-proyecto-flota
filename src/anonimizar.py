@@ -1,3 +1,28 @@
+"""
+Pipeline de anonimización (Guía 4).
+
+Entrada : data/raw/            (ignorada por Git; datos reales de la Compañía)
+Salidas : data/anonimizados/   (lo único que se publica)
+          data/llaves/equivalencias.json  (ignorada por Git; NUNCA se publica)
+          docs/log_anonimizacion.csv      (solo conteos, sin valores reales)
+
+Aplica la tabla de equivalencias acordada por el equipo:
+- Placas            -> VH-01, VH-02... (un solo código por placa en TODAS las fuentes)
+- Conductores       -> Conductor 01, 02...; cédulas y códigos internos se eliminan
+- Talleres          -> Taller 01, 02...
+- Órdenes de servicio -> OS-001, OS-002... (se conserva la repetición para no ocultar errores de calidad)
+- Contratos/campos  -> Contrato A-H; empresa -> la Compañía
+- Coordenadas, calles, direcciones, geocercas -> se eliminan; ciudad/municipio -> región
+- Documentos del vehículo (motor, VIN, chasis, licencia, SOAT, pólizas, avalúo) -> se eliminan
+- Fechas, km, costos, voltajes y eventos -> se mantienen
+
+Cada fuente tiene una política EXPLÍCITA por columna (conservar, codificar, eliminar
+o generalizar). Una columna que no esté en la política se elimina por defecto, para
+que un cambio en el formato de origen nunca filtre información.
+
+Al final se valida cada archivo de salida: si aparece una placa, un nombre de
+conductor, una cédula, un nombre de campo o de empresa real, el archivo NO se exporta.
+"""
 
 from pathlib import Path
 import json
@@ -6,915 +31,437 @@ import unicodedata
 
 import pandas as pd
 
-
-#RUTAS Y CONFIGURACIÓN GENERAL
-
+# ---------------------------------------------------------------------------
+# Rutas
+# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
-
 RAW_DIR = BASE_DIR / "data" / "raw"
-OUTPUT_DIR = BASE_DIR / "data" / "anonimizados"
+OUT_DIR = BASE_DIR / "data" / "anonimizados"
 KEYS_DIR = BASE_DIR / "data" / "llaves"
-
+DOCS_DIR = BASE_DIR / "docs"
 KEYS_FILE = KEYS_DIR / "equivalencias.json"
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-KEYS_DIR.mkdir(parents=True, exist_ok=True)
+ARCHIVO_CONSOLIDADO = "Consolidado_Hojas_de_Vida.xlsx"
+ARCHIVO_EVENTOS = "Detailed Event Report.csv"
+ARCHIVO_VIAJES = "Daily Movement Report.csv"
 
-#Si quedan posibles datos confidenciales sin resolver, no se exporta el archivo.
-BLOQUEAR_SI_HAY_ALERTAS = True
+PATRON_PLACA = re.compile(r"(?<![A-Z0-9])([A-Z]{3})-?(\d{3})(?![0-9])")
+PATRON_PLACA_I = re.compile(PATRON_PLACA.pattern, re.IGNORECASE)
 
-#Columnas cuyos valores deben conservarse sin modificaciones.
-COLUMNAS_CONSERVAR = {
-    "startlatlong",
-    "endlatlong",
-    "coordenadas",
-    "coordenadas gps",
-    "gps coordinates",
+# ---------------------------------------------------------------------------
+# Equivalencias de texto (tabla del equipo; valores fuera del repositorio)
+# ---------------------------------------------------------------------------
+# Las equivalencias de nombres reales (contratos, campos, municipios, empresas) NO están en
+# este código, porque el repositorio es público y revelarían a qué corresponde cada código.
+# Se leen de data/llaves/config_anonimizacion.json (ignorado por Git), que entrega el
+# integrante vinculado a la Compañía. Estructura:
+#   {"SITIOS": [[patrón_regex, "Contrato X (Región)"], ...],
+#    "REGIONES": {"municipio o departamento": "Región", ...},
+#    "TERMINOS_PROHIBIDOS": ["término real que nunca debe aparecer", ...]}
+CONFIG_FILE = KEYS_DIR / "config_anonimizacion.json"
+if not CONFIG_FILE.exists():
+    raise SystemExit(f"Falta {CONFIG_FILE.relative_to(BASE_DIR)} (no se versiona). Pídalo al enlace con la Compañía.")
+_CONFIG = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+SITIOS = [tuple(x) for x in _CONFIG["SITIOS"]]
+REGIONES = _CONFIG["REGIONES"]
+TERMINOS_PROHIBIDOS = _CONFIG["TERMINOS_PROHIBIDOS"]
+
+# ---------------------------------------------------------------------------
+# Políticas por fuente: columna -> acción
+#   "conservar" | "eliminar" | "placa" | "conductor" | "taller" | "orden"
+#   | "sitio" | "region" | ("texto", ) -> texto libre con reemplazo de términos
+# Columnas no listadas se eliminan.
+# ---------------------------------------------------------------------------
+POLITICA_VEHICULOS = {
+    "Placa": "placa", "Marca": "conservar", "Línea": "conservar",
+    "Modelo": "conservar", "Clase": "conservar", "Carrocería": "conservar",
+    "Color": "conservar", "Combustible": "conservar",
+    "Capacidad (kg)": "conservar", "Capacidad (pasajeros)": "conservar",
+    "Fecha expedición de placa": "conservar",
+    "Conductor / asignación": "texto",
+    # Equipamiento de seguridad (Sí/No)
+    "ABS": "conservar", "Control de estabilidad (ESP)": "conservar",
+    "Neumáticos": "conservar", "Iluminación eficiente": "conservar",
+    "Suspensión": "conservar", "Dirección hidráulica": "conservar",
+    "Climatización completa": "conservar",
+    "Mantenimiento correctivo": "conservar", "Airbag": "conservar",
+    "Cinturón de seguridad": "conservar", "Apoyacabezas": "conservar",
+    "Elementos de protección personal": "conservar",
+    "Carrocería (seguridad)": "conservar", "Chasis (seguridad)": "conservar",
+    "Bluetooth incorporado": "conservar", "Mantenimiento preventivo": "conservar",
+    "Vigencia SOAT": "conservar",
+    "Tanque largo": "conservar", "Tanque ancho": "conservar",
+    "Tanque alto": "conservar", "Vencimiento recarga extintor": "conservar",
+    "Revisión técnico-mecánica N°": "eliminar",
+    # Identificadores del vehículo, documentos, seguros, propietario, ubicación
+    "Licencia de tránsito": "eliminar", "N° motor": "eliminar",
+    "N° serie": "eliminar", "N° chasis": "eliminar",
+    "Propietario": "eliminar", "Empresa afiliada": "eliminar",
+    "Factura de venta vehículo": "eliminar", "Factura tanque": "eliminar",
+    "N° SOAT": "eliminar", "Seguro todo riesgo - aseguradora": "eliminar",
+    "Seguro todo riesgo - vigencia": "eliminar", "Responsabilidad": "eliminar",
+    "Deducible": "eliminar", "N° póliza": "eliminar",
+    "Vigencia póliza": "eliminar", "Cupo o póliza N°": "eliminar",
+    "Impuesto municipal": "eliminar", "Avalúo (COP)": "eliminar",
 }
 
-#Columnas que se deben eliminar por contener identificadores personales, vehiculares, documentales o información sensible.
-COLUMNAS_ELIMINAR = {
-    "licencia de transito",
-    "n motor",
-    "numero de motor",
-    "n serie",
-    "numero de serie",
-    "n chasis",
-    "numero de chasis",
-    "vin",
-    "n soat",
-    "numero soat",
-    "seguro todo riesgo aseguradora",
-    "n poliza",
-    "numero poliza",
-    "cupo o poliza n",
-    "avaluo cop",
+POLITICA_MANTENIMIENTOS = {
+    "Placa": "placa", "Fecha": "conservar", "Descripción": "texto",
+    "Tipo": "conservar", "Kilometraje acumulado": "conservar",
+    "Orden de servicio": "orden", "Costo (COP)": "conservar",
+    "Prestador del servicio": "taller",
 }
 
-#Nombres alternativos de columnas que contienen placas.
-COLUMNAS_PLACAS = {
-    "placa",
-    "placas",
-    "assetextra",
-    "matricula",
-    "matricula vehiculo",
-    "vehicle plate",
-    "license plate",
+POLITICA_PLAN = {
+    "Placa": "placa", "Año del plan": "conservar", "Rutina": "conservar",
+    "Servicio del plan (km)": "conservar", "Km programado": "conservar",
+    "Fecha programada": "conservar", "Km ejecutado": "conservar",
+    "Fecha ejecutada": "conservar", "Texto original programado": "texto",
+    "Texto original ejecutado": "texto", "Observación": "texto",
 }
 
-#Nombres alternativos de columnas que contienen conductores u otras personas identificables.
-COLUMNAS_PERSONAS = {
-    "conductor",
-    "nombre conductor",
-    "conductor asignado",
-    "conductor asignacion",
-    "driver",
-    "driver name",
-    "assetname2",
-    "nombre del responsable",
-    "responsable",
-    "nombre del empleado",
-    "nombre del tecnico",
+POLITICA_EVENTOS = {
+    "AssetExtra": "placa",
+    "Asset2SiteName": "sitio",
+    "AssetName2": "conductor",
+    "EventKey": "conservar", "EventDescription": "conservar",
+    "EventType": "conservar", "EventStartDate": "conservar",
+    "EventStartTime": "conservar", "EventEndDate": "conservar",
+    "EventEndTime": "conservar", "TimeZone": "conservar",
+    "TotalOccurs": "conservar", "EventValue": "conservar",
+    "MeasurementUnits": "conservar", "TotalDuration": "conservar",
+    "StartOdo": "conservar", "EndOdo": "conservar",
+    "FuelUsed": "conservar", "DistanceCalculatedFromOdo": "conservar",
+    "F_StartTown": "region", "F_EndTown": "region",
+    # Vacías o constantes, sin información identificable: se conservan para que la
+    # limpieza documente su descarte.
+    "Asset2ReportGroup": "conservar", "FleetNumber": "conservar",
+    "TripID": "conservar", "RoadSpeedLimit": "conservar",
+    "EventLocation": "conservar", "F_StartRegion": "conservar",
+    "F_EndRegion": "conservar",
+    "AssetSiteName": "sitio", "ReportGroup": "texto",
+    # Se eliminan: placa en texto (AssetName, ReportGroup), IDs internos
+    # (AssetID, AssetID2, AssetExtra2), sitio del activo (constante),
+    # calles, barrios, ciudades, geocercas y coordenadas.
+    "AssetName": "eliminar", "AssetID": "eliminar",
+    "AssetExtra2": "eliminar", "AssetID2": "eliminar",
+    "F_StartStreet": "eliminar", "F_StartSuburb": "eliminar",
+    "F_StartCity": "eliminar", "F_EndStreet": "eliminar",
+    "F_EndSuburb": "eliminar", "F_EndCity": "eliminar",
+    "StartLocation": "eliminar", "EndLocation": "eliminar",
+    "StartLatLong": "eliminar", "EndLatLong": "eliminar",
 }
 
-# Valores de asignación que no contienen información personal y deben conservarse sin modificaciones.
-VALORES_NO_PERSONALES = {
-    "asignado a campo",
-    "sin asignacion",
-    "no aplica",
-    "no asignado",
-    "disponible",
-    "vacante",
-    "sin conductor",
-}
-
-#Equivalencias de nombres de empresas, clientes, contratos y campos conocidos por el proyecto.
-EQUIVALENCIAS_TEXTO = {
-    "OMIA COLOMBIA S.A.S.": "La Compañía",
-    "OMIA COLOMBIA": "La Compañía",
-    "OMIA": "La Compañía",
-
-    "Ecopetrol": "Operadora estatal",
-    "Frontera": "Operadora privada 1",
-    "TPL": "Operadora privada 2",
-    "Promisol": "Operadora privada 3",
-
-    "Campo Piedemonte": "Contrato D (Llanos Orientales)",
-    "Piedemonte": "Contrato D (Llanos Orientales)",
-    "Turpial": "Contrato A (Magdalena Medio)",
-    "Abanico": "Contrato B (Tolima)",
-    "Gigante": "Contrato C (Huila)",
-    "Livianos": "Contrato E (Llanos Orientales)",
-    "Pesados": "Contrato F (Llanos Orientales)",
-    "Bonga Mamey": "Contrato G (Caribe)",
-
-    "Mix Telematics": "Plataforma de seguimiento GPS",
-    "Syscaf": "Plataforma de seguimiento GPS",
-}
-
-#Ubicaciones que deben generalizarse.
-EQUIVALENCIAS_UBICACIONES = {
-    "Tauramena": "Llanos Orientales",
-    "Casanare": "Llanos Orientales",
-    "Puerto Boyacá": "Magdalena Medio",
-    "Tolima": "Tolima",
-    "Huila": "Huila",
-    "Meta": "Llanos Orientales",
-    "Sucre": "Caribe",
-}
-
-#Columnas que sus valores deben convertirse en códigos.
-PREFIJOS_IDENTIFICADORES = {
-    "placas": ("VH", 2),
-    "conductores": ("Conductor", 2),
-    "talleres": ("Taller", 2),
-    "proveedores": ("Proveedor", 2),
-    "ordenes": ("OS", 3),
-    "facturas": ("FAC", 3),
+POLITICA_VIAJES = {
+    "AssetExtra": "placa",
+    "SiteName": "sitio",
+    "AssetName2": "conductor",
+    "DepartureDate": "conservar", "DepartureTime": "conservar",
+    "TimeZone1": "conservar", "TripType": "conservar",
+    "DrivingTime": "conservar", "StandingTime": "conservar",
+    "Duration": "conservar", "Distance": "conservar",
+    "StartOdoMeter": "conservar", "EndOdoMeter": "conservar",
+    "MaxSpeed": "conservar", "AvgSpeed": "conservar",
+    "ArrivalTime": "conservar", "ArrivalDate": "conservar",
+    "TimeZone2": "conservar", "NextDepartureDateTime": "conservar",
+    "TimeZone": "conservar", "TimeAtLocation": "conservar",
+    "NrOfVisits": "conservar", "TotalFuelUsedMeasured": "conservar",
+    "CalcFuelConsumption": "conservar",
+    "DepartFrom": "region", "ArriveAt": "region",
+    "FleetNumber": "conservar", "TripClassificationComment": "conservar",
+    "PassengerList": "conservar", "BlankJourneyType": "conservar",
+    "AssetHostID": "eliminar", "AssetID": "eliminar",
+    "AssetExtra2": "eliminar", "StartLatLong": "eliminar",
+    "EndLatLong": "eliminar",
 }
 
 
-#FUNCIONES AUXILIARES
-
-def normalizar_texto(valor):
-    """Normaliza textos para comparar nombres de columnas."""
-
-    texto = str(valor).strip().lower()
-
-    texto = unicodedata.normalize("NFKD", texto)
-    texto = "".join(
-        caracter for caracter in texto
-        if not unicodedata.combining(caracter)
-    )
-
-    texto = re.sub(r"[°º]", "", texto)
-    texto = re.sub(r"[^a-z0-9]+", " ", texto)
-
-    return re.sub(r"\s+", " ", texto).strip()
+# ---------------------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------------------
+def sin_tildes(texto):
+    t = unicodedata.normalize("NFKD", str(texto))
+    return "".join(c for c in t if not unicodedata.combining(c)).lower().strip()
 
 
-def es_valor_vacio(valor):
-    """Comprueba si un valor está vacío o es nulo."""
-
+def normalizar_placa(valor):
+    """'ABC-123_Marca_Linea_2024', 'ABC 123', 'abc123' -> 'ABC123'."""
     if pd.isna(valor):
-        return True
+        return None
+    m = PATRON_PLACA.search(str(valor).upper())
+    return f"{m.group(1)}{m.group(2)}" if m else None
 
-    return str(valor).strip() == ""
+
+def normalizar_taller(valor):
+    """Unifica variantes de escritura del mismo taller antes de codificar.
+    'TALLERES AUTORIZADOS NISSAN', 'TALLER AUTORIZADO NISSAN' y
+    'TALLERES AUTORIZADOS' son el mismo prestador (red autorizada de la marca)."""
+    t = sin_tildes(valor)
+    t = re.sub(r"\btalleres\b", "taller", t)
+    t = re.sub(r"\bautorizados\b", "autorizado", t)
+    t = re.sub(r"\s+nissan\b", "", t)
+    return re.sub(r"\s+", " ", t).strip()
 
 
-def cargar_equivalencias():
-    """Carga las equivalencias existentes o crea los diccionarios."""
+def separar_conductor(valor):
+    """'NOMBRE APELLIDO_<cédula>_<empresa>' -> ('nombre apellido', ['<cédula>'])."""
+    if pd.isna(valor):
+        return None, []
+    partes = str(valor).split("_")
+    nombre = sin_tildes(partes[0])
+    numeros = [p for p in partes[1:] if p.isdigit()]
+    return nombre, numeros
 
+
+def cargar_llaves():
     if KEYS_FILE.exists():
-        with open(KEYS_FILE, "r", encoding="utf-8") as archivo:
-            equivalencias = json.load(archivo)
-    else:
-        equivalencias = {}
-
-    #Permite incorporar nuevas categorías sin perder las anteriores.
-    for categoria in PREFIJOS_IDENTIFICADORES:
-        equivalencias.setdefault(categoria, {})
-
-    return equivalencias
+        return json.loads(KEYS_FILE.read_text(encoding="utf-8"))
+    return {}
 
 
-def guardar_equivalencias(equivalencias):
-    """Guarda las equivalencias localmente."""
-
-    with open(KEYS_FILE, "w", encoding="utf-8") as archivo:
-        json.dump(
-            equivalencias,
-            archivo,
-            ensure_ascii=False,
-            indent=4
-        )
+def guardar_llaves(llaves):
+    KEYS_DIR.mkdir(parents=True, exist_ok=True)
+    KEYS_FILE.write_text(json.dumps(llaves, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def obtener_codigo(categoria, valor, equivalencias):
-    """
-    Asigna un código consecutivo y conserva la equivalencia
-    en futuras ejecuciones.
-    """
+def asignar_codigos(valores, existentes, prefijo, ancho, separador=" "):
+    """Conserva los códigos ya asignados y agrega los nuevos en orden alfabético,
+    de modo que volver a correr el pipeline no cambia los códigos."""
+    codigos = dict(existentes)
+    usados = len(codigos)
+    for v in sorted(set(valores) - set(codigos)):
+        usados += 1
+        codigos[v] = f"{prefijo}{separador}{usados:0{ancho}d}"
+    return codigos
 
-    if es_valor_vacio(valor):
+
+def generalizar_region(valor):
+    if pd.isna(valor):
         return valor
-
-    valor_original = str(valor).strip()
-    registro = equivalencias[categoria]
-
-    #Evita duplicados por diferencias de mayúsculas, minúsculas o espacios.
-    for original, codigo in registro.items():
-        if normalizar_texto(original) == normalizar_texto(valor_original):
-            return codigo
-
-    prefijo, digitos = PREFIJOS_IDENTIFICADORES[categoria]
-
-    numero = len(registro) + 1
-
-    if categoria in {"conductores", "talleres", "proveedores"}:
-        codigo = f"{prefijo} {numero:0{digitos}d}"
-    else:
-        codigo = f"{prefijo}-{numero:0{digitos}d}"
-
-    registro[valor_original] = codigo
-
-    return codigo
-
-
-#CARGA Y GUARDADO DE ARCHIVOS
-
-def cargar_archivo(ruta):
-    """Carga archivos CSV o Excel."""
-
-    extension = ruta.suffix.lower()
-
-    if extension == ".csv":
-
-        ultimo_error = None
-
-        #Probar distintas codificaciones.
-        for encoding in ["utf-8-sig", "cp1252", "latin-1"]:
-            try:
-                return {
-                    "Datos": pd.read_csv(
-                        ruta,
-                        sep=None,
-                        engine="python",
-                        encoding=encoding
-                    )
-                }
-
-            except (UnicodeDecodeError, pd.errors.ParserError) as error:
-                ultimo_error = error
-
-        raise ValueError(
-            f"No fue posible leer el CSV {ruta.name}: {ultimo_error}"
-        )
-
-    elif extension in [".xlsx", ".xls"]:
-
-        try:
-            return pd.read_excel(ruta, sheet_name=None)
-
-        except ImportError as error:
-            raise ImportError(
-                "Falta instalar el motor de lectura de Excel. Para archivos XLSX instalar openpyxl y para XLS instalar xlrd."
-            ) from error
-
-    else:
-        raise ValueError(f"Formato no compatible: {extension}")
-
-
-def guardar_archivo(hojas, ruta):
-    """Guarda los datos anonimizados en CSV o Excel."""
-
-    if ruta.suffix.lower() == ".csv":
-
-        hojas["Datos"].to_csv(
-            ruta,
-            index=False,
-            encoding="utf-8-sig"
-        )
-
-    elif ruta.suffix.lower() == ".xlsx":
-
-        with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
-
-            for nombre_hoja, df in hojas.items():
-
-                nombre_seguro = str(nombre_hoja)[:31]
-
-                df.to_excel(
-                    writer,
-                    sheet_name=nombre_seguro,
-                    index=False
-                )
-
-    else:
-        raise ValueError(f"Formato no compatible: {ruta.suffix}")
-
-
-#IDENTIFICACIÓN DE VALORES CONFIDENCIALES
-
-def identificar_categoria(nombre_columna):
-    """Identifica la categoría de información según el nombre de columna."""
-
-    nombre = normalizar_texto(nombre_columna)
-
-    if nombre in COLUMNAS_PLACAS:
-        return "placas"
-
-    if nombre in COLUMNAS_PERSONAS:
-        return "conductores"
-
-    if "prestador" in nombre or "taller" in nombre:
-        return "talleres"
-
-    if "proveedor" in nombre:
-        return "proveedores"
-
-    if "orden de servicio" in nombre or "solped" in nombre:
-        return "ordenes"
-
-    if "factura" in nombre:
-        return "facturas"
-
-    return None
-
-
-def recopilar_valores(archivos):
-    """Reúne los valores sensibles de todos los archivos y hojas para mantener los códigos consistentes."""
-
-    valores = {
-        categoria: set()
-        for categoria in PREFIJOS_IDENTIFICADORES
-    }
-
-    patron_placa = r"\b[A-Z]{3}[- ]?\d{3}\b"
-
-    for hojas in archivos.values():
-
-        for df in hojas.values():
-
-            for columna in df.columns:
-
-                categoria = identificar_categoria(columna)
-
-                if categoria:
-
-                    for valor in df[columna].dropna():
-
-                        texto = str(valor).strip()
-
-                        if not texto:
-                            continue
-
-                        if categoria == "conductores" and (
-                            normalizar_texto(texto) in VALORES_NO_PERSONALES
-                            or normalizar_texto(texto) in {
-                                "conductor desconocido",
-                                "desconocido",
-                                "no identificado",
-                                "conductor no identificado",
-                            }
-                        ):
-                            continue
-
-                        if categoria in {"ordenes", "facturas"}:
-                            if normalizar_texto(texto) in {
-                                "na", "n a", "no aplica"
-                            }:
-                                continue
-
-                        valores[categoria].add(texto)
-
-            # Buscar placas dentro de textos, por ejemplo AssetName.
-            for columna in df.select_dtypes(include=["object"]).columns:
-
-                if normalizar_texto(columna) in COLUMNAS_CONSERVAR:
-                    continue
-
-                for valor in df[columna].dropna():
-
-                    coincidencias = re.findall(
-                        patron_placa,
-                        str(valor),
-                        flags=re.IGNORECASE
-                    )
-
-                    for placa in coincidencias:
-                        valores["placas"].add(placa.strip())
-
-    return valores
-
-
-def construir_equivalencias(valores, equivalencias):
-    """Crea los códigos anónimos que todavía no existen."""
-
-    for categoria, lista_valores in valores.items():
-
-        for valor in sorted(lista_valores):
-
-            obtener_codigo(
-                categoria,
-                valor,
-                equivalencias
-            )
-
-
-#REEMPLAZO DE INFORMACIÓN EN TEXTOS LIBRES
-
-def reemplazar_en_texto(texto, equivalencias_texto):
-    """Reemplaza expresiones conocidas dentro de un texto."""
-
-    if not isinstance(texto, str):
-        return texto
-
-    resultado = texto
-
-    #Reemplazar primero las expresiones más largas.
-    for original, anonimizado in sorted(
-        equivalencias_texto.items(),
-        key=lambda elemento: len(elemento[0]),
-        reverse=True
-    ):
-
-        patron = (
-            r"(?<!\w)"
-            + re.escape(original)
-            + r"(?!\w)"
-        )
-
-        resultado = re.sub(
-            patron,
-            lambda coincidencia: anonimizado,
-            resultado,
-            flags=re.IGNORECASE
-        )
-
-    return resultado
-
-
-def reemplazar_identificadores(texto, categoria, equivalencias):
-    """Reemplaza identificadores conocidos dentro de textos libres."""
-
-    if not isinstance(texto, str):
-        return texto
-
-    resultado = texto
-
-    for original, codigo in sorted(
-        equivalencias[categoria].items(),
-        key=lambda elemento: len(elemento[0]),
-        reverse=True
-    ):
-
-        patron = (
-            r"(?<!\w)"
-            + re.escape(original)
-            + r"(?!\w)"
-        )
-
-        resultado = re.sub(
-            patron,
-            lambda coincidencia: codigo,
-            resultado,
-            flags=re.IGNORECASE
-        )
-
-    return resultado
-
-
-def anonimizar_texto(valor, equivalencias):
-
-    if not isinstance(valor, str):
+    t = sin_tildes(valor)
+    if "unknown" in t or t == "":
+        return "Sin dato"
+    for clave, region in REGIONES.items():
+        if re.search(rf"\b{re.escape(clave)}\b", t):
+            return region
+    return "Otra región"
+
+
+def generalizar_sitio(valor):
+    if pd.isna(valor):
         return valor
+    t = sin_tildes(valor)
+    for patron, nombre in SITIOS:
+        if re.search(patron, t):
+            return nombre
+    return "Otro grupo"
 
-    # Conservar valores operativos que no contienen información personal.
-    if normalizar_texto(valor) in VALORES_NO_PERSONALES:
+
+def reemplazar_texto(valor, llaves):
+    """Texto libre: reemplaza placas y nombres de empresas/campos."""
+    if pd.isna(valor):
         return valor
-
-    texto = valor
-
-    #Empresas, contratos y ubicaciones.
-    texto = reemplazar_en_texto(
-        texto,
-        EQUIVALENCIAS_TEXTO
+    texto = PATRON_PLACA_I.sub(
+        lambda m: llaves["placas"].get(f"{m.group(1).upper()}{m.group(2)}", "VH-??"),
+        str(valor),
     )
-
-    texto = reemplazar_en_texto(
-        texto,
-        EQUIVALENCIAS_UBICACIONES
-    )
-
-    #Identificadores conocidos.
-    for categoria in PREFIJOS_IDENTIFICADORES:
-
-        texto = reemplazar_identificadores(
-            texto,
-            categoria,
-            equivalencias
-        )
-
-    #Placas que puedan aparecer dentro de textos nuevos.
-    patron_placa = r"\b[A-Z]{3}[- ]?\d{3}\b"
-
-    coincidencias = re.findall(
-        patron_placa,
-        texto,
-        flags=re.IGNORECASE
-    )
-
-    for placa in set(coincidencias):
-
-        codigo = obtener_codigo(
-            "placas",
-            placa,
-            equivalencias
-        )
-
-        texto = re.sub(
-            re.escape(placa),
-            codigo,
-            texto,
-            flags=re.IGNORECASE
-        )
-
+    for patron, nombre in SITIOS:
+        texto = re.sub(patron, nombre, texto, flags=re.IGNORECASE)
+    for patron, nombre in _CONFIG.get("EMPRESAS", []):
+        texto = re.sub(patron, nombre, texto, flags=re.IGNORECASE)
     return texto
 
 
-#ANONIMIZACIÓN DE COLUMNAS
-
-def anonimizar_valor_columna(valor, categoria, equivalencias):
-    """Anonimiza los valores de una columna identificada."""
-
-    if es_valor_vacio(valor):
-        return valor
-
-    texto = str(valor).strip()
-    texto_normalizado = normalizar_texto(texto)
-
-    # Conservar valores que no identifican personas.
-    if categoria == "conductores":
-
-        if texto_normalizado in VALORES_NO_PERSONALES:
-            return valor
-
-        if texto_normalizado in {
-            "conductor desconocido",
-            "desconocido",
-            "no identificado",
-            "conductor no identificado",
-        }:
-            return "Conductor no identificado"
-
-    if categoria in {"ordenes", "facturas"}:
-        if texto_normalizado in {
-            "na", "n a", "no aplica"
-        }:
-            return valor
-
-    return obtener_codigo(
-        categoria,
-        texto,
-        equivalencias
-    )
-
-
-def eliminar_columnas(df):
-    """Elimina las columnas configuradas como confidenciales."""
-
-    columnas_eliminar = []
-
-    for columna in df.columns:
-
-        nombre = normalizar_texto(columna)
-
-        if nombre in {
-            normalizar_texto(c)
-            for c in COLUMNAS_ELIMINAR
-        }:
-            columnas_eliminar.append(columna)
-
-    return df.drop(columns=columnas_eliminar)
-
-
-def anonimizar_hoja(df, equivalencias):
-    """Aplica las reglas generales a cualquier hoja de datos."""
-
-    df = df.copy()
-
-    #Eliminar columnas confidenciales.
-    df = eliminar_columnas(df)
-
-    for columna in df.columns:
-
-        nombre = normalizar_texto(columna)
-
-        #Conservar las coordenadas GPS sin modificaciones.
-        if nombre in {
-            normalizar_texto(c)
-            for c in COLUMNAS_CONSERVAR
-        }:
-            continue
-
-        categoria = identificar_categoria(columna)
-
-        if categoria:
-
-            df[columna] = df[columna].apply(
-                lambda valor: anonimizar_valor_columna(
-                    valor,
-                    categoria,
-                    equivalencias
-                )
-            )
-
-        # Aplicar reemplazos en todas las columnas de texto para detectar información identificable en descripciones, observaciones y otros campos libres.
-        if (
-            pd.api.types.is_object_dtype(df[columna])
-            or pd.api.types.is_string_dtype(df[columna])
-        ):
-
-            df[columna] = df[columna].apply(
-                lambda valor: anonimizar_texto(
-                    valor,
-                    equivalencias
-                )
-            )
-
-    return df
-
-
-#VALIDACIÓN DE POSIBLES DATOS CONFIDENCIALES
-
-def validar_hoja(df, nombre_hoja, equivalencias):
-    """Busca patrones conocidos y valores originales que puedan haber quedado sin anonimizar."""
-
-    hallazgos = []
-
-    patrones = {
-        "Posible placa sin anonimizar": r"\b[A-Z]{3}[- ]?\d{3}\b",
-
-        "Posible identificación etiquetada": (
-            r"\b(?:CC|C\.C\.|NIT|CEDULA|CÉDULA)"
-            r"\s*[:#-]?\s*\d{5,}\b"
-        ),
+# ---------------------------------------------------------------------------
+# Carga
+# ---------------------------------------------------------------------------
+def cargar_fuentes():
+    consolidado = pd.read_excel(RAW_DIR / ARCHIVO_CONSOLIDADO, sheet_name=None, dtype={"Orden de servicio": str})
+    leer = lambda nombre: pd.read_csv(RAW_DIR / nombre, encoding="utf-8-sig", dtype=str)
+    fuentes = {
+        "consolidado": consolidado,
+        "eventos": leer(ARCHIVO_EVENTOS),
+        "viajes": leer(ARCHIVO_VIAJES) if (RAW_DIR / ARCHIVO_VIAJES).exists() else None,
     }
+    return fuentes
 
-    valores_sensibles = []
 
-    for categoria in PREFIJOS_IDENTIFICADORES:
+def construir_llaves(fuentes, llaves):
+    """Recorre TODAS las fuentes antes de anonimizar, para que cada placa,
+    conductor, taller y orden tenga un único código en todos los archivos."""
+    placas, conductores, talleres, ordenes, cedulas = set(), set(), set(), set(), set()
 
-        valores_sensibles.extend(
-            equivalencias[categoria].keys()
-        )
+    c = fuentes["consolidado"]
+    for hoja in c.values():
+        if "Placa" in hoja:
+            placas |= {p for p in hoja["Placa"].map(normalizar_placa) if p}
+    m = c["Mantenimientos"]
+    talleres |= set(m["Prestador del servicio"].dropna().map(normalizar_taller))
+    ordenes |= set(m["Orden de servicio"].dropna().astype(str).str.strip())
 
-    valores_sensibles.extend(EQUIVALENCIAS_TEXTO.keys())
-    valores_sensibles.extend(EQUIVALENCIAS_UBICACIONES.keys())
-
-    for columna in df.columns:
-
-        nombre = normalizar_texto(columna)
-
-        if nombre in {
-            normalizar_texto(c)
-            for c in COLUMNAS_CONSERVAR
-        }:
+    for nombre in ("eventos", "viajes"):
+        df = fuentes[nombre]
+        if df is None:
             continue
+        # La placa aparece en varias columnas de texto (AssetName, ReportGroup...)
+        for col in df.columns:
+            if df[col].dtype == object or pd.api.types.is_string_dtype(df[col]):
+                muestra = df[col].dropna().astype(str).str.upper().unique()
+                for v in muestra:
+                    for m_ in PATRON_PLACA.finditer(v):
+                        placas.add(f"{m_.group(1)}{m_.group(2)}")
+        for v in df["AssetName2"].dropna().unique():
+            nombre_c, nums = separar_conductor(v)
+            conductores.add(nombre_c)
+            cedulas.update(nums)
+        for col in ("AssetExtra2", "AssetID2"):
+            if col in df:
+                cedulas.update(df[col].dropna().astype(str).str.replace(r"\.0$", "", regex=True))
 
-        for indice, valor in df[columna].items():
-
-            if not isinstance(valor, str):
-                continue
-
-            #Buscar patrones conocidos.
-            for descripcion, patron in patrones.items():
-
-                if re.search(
-                    patron,
-                    valor,
-                    flags=re.IGNORECASE
-                ):
-
-                    hallazgos.append({
-                        "hoja": nombre_hoja,
-                        "fila": indice + 2,
-                        "columna": columna,
-                        "tipo": descripcion,
-                        "valor": valor[:100],
-                    })
-
-                    break
-
-            else:
-
-                #Buscar valores originales conocidos.
-                for original in valores_sensibles:
-
-                    patron = (
-                        r"(?<!\w)"
-                        + re.escape(original)
-                        + r"(?!\w)"
-                    )
-
-                    if re.search(
-                        patron,
-                        valor,
-                        flags=re.IGNORECASE
-                    ):
-
-                        hallazgos.append({
-                            "hoja": nombre_hoja,
-                            "fila": indice + 2,
-                            "columna": columna,
-                            "tipo": "Posible valor original pendiente",
-                            "valor": valor[:100],
-                        })
-
-                        break
-
-    return hallazgos
+    # Las placas de la flota analizada (hoja Vehículos) reciben los primeros códigos.
+    flota = sorted({normalizar_placa(p) for p in c["Vehículos"]["Placa"]})
+    llaves["placas"] = asignar_codigos(flota, llaves.get("placas", {}), "VH-", 2, separador="")
+    llaves["placas"] = asignar_codigos(placas, llaves["placas"], "VH-", 2, separador="")
+    desconocido = {n for n in conductores if "desconocido" in n}
+    llaves["conductores"] = asignar_codigos(conductores - desconocido, llaves.get("conductores", {}), "Conductor", 2)
+    for n in desconocido:
+        llaves["conductores"][n] = "Conductor sin identificar"
+    llaves["talleres"] = asignar_codigos(talleres, llaves.get("talleres", {}), "Taller", 2)
+    llaves["ordenes"] = asignar_codigos(ordenes, llaves.get("ordenes", {}), "OS-", 3, separador="")
+    llaves["_cedulas"] = sorted(cedulas)  # solo para validar; nunca se exporta
+    return llaves
 
 
-def validar_archivo(hojas, nombre_archivo, equivalencias):
-    """Valida todas las hojas antes de exportar."""
+# ---------------------------------------------------------------------------
+# Anonimización
+# ---------------------------------------------------------------------------
+def aplicar_politica(df, politica, llaves, nombre, log):
+    salida = pd.DataFrame(index=df.index)
+    for col in df.columns:
+        accion = politica.get(col, "eliminar")
+        if accion == "eliminar":
+            continue
+        s = df[col]
+        if accion == "conservar":
+            salida[col] = s
+        elif accion == "placa":
+            salida[col] = s.map(lambda v: llaves["placas"].get(normalizar_placa(v)) if pd.notna(v) else v)
+        elif accion == "conductor":
+            salida[col] = s.map(lambda v: llaves["conductores"].get(separar_conductor(v)[0]) if pd.notna(v) else v)
+        elif accion == "taller":
+            salida[col] = s.map(lambda v: llaves["talleres"].get(normalizar_taller(v)) if pd.notna(v) else v)
+        elif accion == "orden":
+            salida[col] = s.map(lambda v: llaves["ordenes"].get(str(v).strip()) if pd.notna(v) else v)
+        elif accion == "sitio":
+            salida[col] = s.map(generalizar_sitio)
+        elif accion == "region":
+            salida[col] = s.map(generalizar_region)
+        elif accion == "texto":
+            salida[col] = s.map(lambda v: reemplazar_texto(v, llaves))
+        log.append({"archivo": nombre, "columna": col, "accion": accion})
+    for col in df.columns:
+        if politica.get(col, "eliminar") == "eliminar":
+            motivo = "política" if col in politica else "no listada (eliminada por defecto)"
+            log.append({"archivo": nombre, "columna": col, "accion": f"eliminar ({motivo})"})
+    return salida
 
+
+def agregar_formato_orden(original, anonimizado):
+    """El código OS-NNN oculta el número real; antes de reemplazarlo se deja una
+    bandera de si el número original seguía el patrón de 8 dígitos (6905xxxx o 6900xxxx).
+    Así la limpieza puede reportar este problema de calidad sin conocer el número."""
+    orden = original["Orden de servicio"].astype(str).str.strip()
+    anonimizado["Orden de servicio formato válido"] = orden.str.fullmatch(r"690\d{5}")
+    return anonimizado
+
+
+# ---------------------------------------------------------------------------
+# Validación: si encuentra algo, el archivo NO se exporta
+# ---------------------------------------------------------------------------
+def validar(df, nombre, llaves):
+    nombres_conductores = [n for n in llaves["conductores"]
+                           if "desconocido" not in n and re.search(r"[a-z]{3}", n)]
+    cedulas = {c for c in llaves["_cedulas"] if len(c) >= 6}
+    patron_placa = PATRON_PLACA.pattern.replace("([A-Z]{3})", "(?:[A-Z]{3})").replace(r"(\d{3})", r"(?:\d{3})")
     hallazgos = []
-
-    for nombre_hoja, df in hojas.items():
-
-        hallazgos.extend(
-            validar_hoja(
-                df,
-                nombre_hoja,
-                equivalencias
-            )
-        )
-
+    for col in df.columns:
+        texto = df[col].dropna().astype(str)
+        if texto.empty:
+            continue
+        unicos = pd.Series(texto.unique())
+        bajo = unicos.map(sin_tildes)
+        if unicos.str.upper().str.contains(patron_placa, regex=True).any():
+            hallazgos.append((col, "placa real"))
+        for termino in TERMINOS_PROHIBIDOS:
+            if bajo.str.contains(re.escape(termino)).any():
+                hallazgos.append((col, f"término '{termino}'"))
+        for n in nombres_conductores:
+            if bajo.str.contains(re.escape(n)).any():
+                hallazgos.append((col, "nombre de conductor"))
+                break
+        if unicos.str.replace(r"\.0$", "", regex=True).isin(cedulas).any():
+            hallazgos.append((col, "cédula o código interno"))
     if hallazgos:
-
-        print(
-            f"\nADVERTENCIA: se encontraron posibles datos "
-            f"pendientes en {nombre_archivo}."
-        )
-
-        for hallazgo in hallazgos[:20]:
-
-            print(
-                f" - Hoja: {hallazgo['hoja']} | "
-                f"Fila: {hallazgo['fila']} | "
-                f"Columna: {hallazgo['columna']} | "
-                f"{hallazgo['tipo']} | "
-                f"Valor: {hallazgo['valor']}"
-            )
-
-        if len(hallazgos) > 20:
-            print(
-                f" - Y {len(hallazgos) - 20} hallazgos adicionales."
-            )
-
-        return False
-
-    print(f"Validación automática superada: {nombre_archivo}")
-
-    return True
+        print(f"  ✗ {nombre}: NO se exporta. Hallazgos:")
+        for col, tipo in sorted(set(hallazgos)):
+            print(f"      - columna '{col}': {tipo}")
+    return not hallazgos
 
 
-#PROCESAMIENTO DE ARCHIVOS
+# ---------------------------------------------------------------------------
+# Ejecución
+# ---------------------------------------------------------------------------
+def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    DOCS_DIR.mkdir(exist_ok=True)
+    fuentes = cargar_fuentes()
+    llaves = construir_llaves(fuentes, cargar_llaves())
+    log = []
+    resultado_ok = True
 
-def procesar_archivo(archivo, equivalencias):
-    """Carga, anonimiza, valida y guarda el archivo."""
+    # Consolidado (3 hojas)
+    c = fuentes["consolidado"]
+    hojas = {
+        "Vehículos": aplicar_politica(c["Vehículos"], POLITICA_VEHICULOS, llaves, "Consolidado/Vehículos", log),
+        "Mantenimientos": agregar_formato_orden(
+            c["Mantenimientos"],
+            aplicar_politica(c["Mantenimientos"], POLITICA_MANTENIMIENTOS, llaves, "Consolidado/Mantenimientos", log),
+        ),
+        "Plan de mantenimiento": aplicar_politica(c["Plan de mantenimiento"], POLITICA_PLAN, llaves, "Consolidado/Plan", log),
+    }
+    if all(validar(h, f"Consolidado/{n}", llaves) for n, h in hojas.items()):
+        with pd.ExcelWriter(OUT_DIR / "Consolidado_Hojas_de_Vida_anonimizado.xlsx") as w:
+            for n, h in hojas.items():
+                h.to_excel(w, sheet_name=n, index=False)
+        print("  ✓ Consolidado_Hojas_de_Vida_anonimizado.xlsx")
+    else:
+        resultado_ok = False
 
-    print(f"\nProcesando: {archivo.name}")
-
-    try:
-
-        hojas = cargar_archivo(archivo)
-
-        hojas_anonimizadas = {}
-
-        #Anonimizar todas las hojas.
-        for nombre_hoja, df in hojas.items():
-
-            print(f"  Hoja: {nombre_hoja}")
-
-            df_anonimizado = anonimizar_hoja(
-                df,
-                equivalencias
-            )
-
-            hojas_anonimizadas[nombre_hoja] = df_anonimizado
-
-            print(
-                f"    Filas: {df_anonimizado.shape[0]} | "
-                f"Columnas: {df_anonimizado.shape[1]}"
-            )
-
-        #Guardar las equivalencias generadas.
-        guardar_equivalencias(equivalencias)
-
-        #Validar antes de exportar.
-        if BLOQUEAR_SI_HAY_ALERTAS:
-
-            validacion = validar_archivo(
-                hojas_anonimizadas,
-                archivo.name,
-                equivalencias
-            )
-
-            if not validacion:
-                print(
-                    "Archivo no exportado. "
-                    "Requiere revisión manual."
-                )
-                return
-
-        #Mantener el formato original cuando sea posible.
-        if archivo.suffix.lower() == ".xls":
-
-            nombre_salida = (
-                archivo.stem + "_anonimizado.xlsx"
-            )
-
+    # Eventos y viajes
+    for clave, politica, salida in (
+        ("eventos", POLITICA_EVENTOS, "Detailed Event Report_anonimizado.csv"),
+        ("viajes", POLITICA_VIAJES, "Daily Movement Report_anonimizado.csv"),
+    ):
+        df = fuentes[clave]
+        if df is None:
+            print(f"  - {clave}: no se encontró el archivo de origen")
+            continue
+        anon = aplicar_politica(df, politica, llaves, clave, log)
+        if validar(anon, clave, llaves):
+            anon.to_csv(OUT_DIR / salida, index=False, encoding="utf-8-sig")
+            print(f"  ✓ {salida} ({len(anon):,} filas, {anon.shape[1]} columnas)")
         else:
+            resultado_ok = False
 
-            nombre_salida = (
-                archivo.stem
-                + "_anonimizado"
-                + archivo.suffix
-            )
-
-        ruta_salida = OUTPUT_DIR / nombre_salida
-
-        guardar_archivo(
-            hojas_anonimizadas,
-            ruta_salida
-        )
-
-        print(f"Archivo guardado: {ruta_salida.name}")
-
-    except Exception as error:
-
-        print(
-            f"Error al procesar {archivo.name}: {error}"
-        )
-
-
-#EJECUCIÓN PRINCIPAL
-
-def procesar_archivos():
-    """Procesa todos los archivos compatibles de data/raw."""
-
-    if not RAW_DIR.exists():
-
-        print("No existe la carpeta data/raw/.")
-        return
-
-    archivos = [
-        archivo
-        for archivo in RAW_DIR.iterdir()
-        if archivo.is_file()
-        and archivo.suffix.lower() in {
-            ".csv",
-            ".xlsx",
-            ".xls"
-        }
-        and not archivo.name.startswith("~$")
-    ]
-
-    if not archivos:
-
-        print("No se encontraron archivos compatibles en data/raw/.")
-        return
-
-    print(f"Archivos encontrados: {len(archivos)}")
-
-    #Cargar equivalencias existentes.
-    equivalencias = cargar_equivalencias()
-
-    #Cargar todos los archivos para identificar los valores antes de anonimizar para mantener la consistencia de códigos.
-    archivos_cargados = {}
-
-    for archivo in archivos:
-
-        try:
-            archivos_cargados[archivo] = cargar_archivo(archivo)
-
-        except Exception as error:
-            print(f"No se pudo cargar {archivo.name}: {error}")
-
-    if not archivos_cargados:
-
-        print("No fue posible cargar los archivos.")
-        return
-
-    #Recopilar valores confidenciales de todos los archivos.
-    valores = recopilar_valores(archivos_cargados)
-
-    construir_equivalencias(
-        valores,
-        equivalencias
-    )
-
-    #Guardar equivalencias antes del procesamiento.
-    guardar_equivalencias(equivalencias)
-
-    #Procesar cada archivo.
-    for archivo, hojas in archivos_cargados.items():
-
-        procesar_archivo(
-            archivo,
-            equivalencias
-        )
-
-    guardar_equivalencias(equivalencias)
-
-    print("\nPIPELINE DE ANONIMIZACIÓN FINALIZADO.")
+    guardar_llaves({k: v for k, v in llaves.items() if not k.startswith("_")})
+    pd.DataFrame(log).to_csv(DOCS_DIR / "log_anonimizacion.csv", index=False, encoding="utf-8-sig")
+    resumen = {k: len(v) for k, v in llaves.items() if not k.startswith("_")}
+    print(f"Códigos asignados: {resumen}")
+    print("Log de columnas: docs/log_anonimizacion.csv")
+    if not resultado_ok:
+        raise SystemExit("Hay archivos que no pasaron la validación; revise los hallazgos.")
 
 
 if __name__ == "__main__":
-
-    print("INICIO DEL PIPELINE DE ANONIMIZACIÓN")
-
-    procesar_archivos()
+    print("PIPELINE DE ANONIMIZACIÓN")
+    main()

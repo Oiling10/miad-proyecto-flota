@@ -1,6 +1,6 @@
-placa,dias_con_eventos,km_dia_mediana,cobertura_km_dia,n_conductores,pct_sin_gps,ralenti_h_dia,volt_mediano_mv,dias_entre_prev_mediana,km_entre_prev_mediana,n_correctivos,n_no_programados,segmento_uso
-VH-06,408,141.3,0.976,18,0.184,2.091,12063.621,38.0,5266.0,4,0,alto
-VH-07,400,113.2,0.978,14,0.201,2.077,12364.272,43.5,5325.0,6,2,alto
-VH-08,250,91.0,0.133,11,0.163,1.306,12760.095,48.5,5385.0,4,1,medio
-VH-09,398,22.9,0.978,13,0.198,0.901,12219.316,96.0,5094.0,1,0,bajo
-VH-10,409,125.0,0.98,12,0.185,2.603,12627.341,38.0,5385.0,4,0,alto
+placa,dias_con_eventos,km_dia_mediana,km_dia_mediana_viajes,cobertura_km_dia,viajes_cortos_pct,alertas_voltaje,desconexiones_bateria,n_conductores,pct_sin_gps,ralenti_h_dia,volt_mediano_mv,dias_entre_prev_mediana,km_entre_prev_mediana,n_correctivos,n_no_programados,segmento_uso
+VH-01,398,22.9,22.95,0.978,0.519,859,29,13,0.198,0.901,12341.722,96.0,5094.0,1,0,bajo
+VH-02,409,124.7,132.45,0.98,0.424,308,11,12,0.185,2.603,12747.6,38.0,5385.0,4,0,alto
+VH-03,400,113.6,123.6,0.978,0.49,499,25,14,0.201,2.077,12577.232,43.5,5325.0,6,2,alto
+VH-04,408,140.695,140.65,0.976,0.444,909,4,18,0.184,2.091,12396.071,38.0,5266.0,4,0,alto
+VH-05,250,87.7,82.85,0.221,0.443,68,2,11,0.163,1.306,12849.937,48.5,5385.0,4,1,medio
