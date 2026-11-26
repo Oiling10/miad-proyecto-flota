@@ -1,0 +1,151 @@
+﻿archivo,columna,accion
+Consolidado/Vehículos,Placa,placa
+Consolidado/Vehículos,Marca,conservar
+Consolidado/Vehículos,Línea,conservar
+Consolidado/Vehículos,Modelo,conservar
+Consolidado/Vehículos,Clase,conservar
+Consolidado/Vehículos,Carrocería,conservar
+Consolidado/Vehículos,Color,conservar
+Consolidado/Vehículos,Combustible,conservar
+Consolidado/Vehículos,Capacidad (kg),conservar
+Consolidado/Vehículos,Capacidad (pasajeros),conservar
+Consolidado/Vehículos,Conductor / asignación,texto
+Consolidado/Vehículos,Fecha expedición de placa,conservar
+Consolidado/Vehículos,Tanque largo,conservar
+Consolidado/Vehículos,Tanque ancho,conservar
+Consolidado/Vehículos,Tanque alto,conservar
+Consolidado/Vehículos,Vencimiento recarga extintor,conservar
+Consolidado/Vehículos,ABS,conservar
+Consolidado/Vehículos,Control de estabilidad (ESP),conservar
+Consolidado/Vehículos,Neumáticos,conservar
+Consolidado/Vehículos,Iluminación eficiente,conservar
+Consolidado/Vehículos,Suspensión,conservar
+Consolidado/Vehículos,Dirección hidráulica,conservar
+Consolidado/Vehículos,Climatización completa,conservar
+Consolidado/Vehículos,Mantenimiento correctivo,conservar
+Consolidado/Vehículos,Airbag,conservar
+Consolidado/Vehículos,Cinturón de seguridad,conservar
+Consolidado/Vehículos,Apoyacabezas,conservar
+Consolidado/Vehículos,Elementos de protección personal,conservar
+Consolidado/Vehículos,Carrocería (seguridad),conservar
+Consolidado/Vehículos,Chasis (seguridad),conservar
+Consolidado/Vehículos,Bluetooth incorporado,conservar
+Consolidado/Vehículos,Mantenimiento preventivo,conservar
+Consolidado/Vehículos,Vigencia SOAT,conservar
+Consolidado/Vehículos,Licencia de tránsito,eliminar (política)
+Consolidado/Vehículos,N° motor,eliminar (política)
+Consolidado/Vehículos,N° serie,eliminar (política)
+Consolidado/Vehículos,N° chasis,eliminar (política)
+Consolidado/Vehículos,Propietario,eliminar (política)
+Consolidado/Vehículos,Empresa afiliada,eliminar (política)
+Consolidado/Vehículos,Factura de venta vehículo,eliminar (política)
+Consolidado/Vehículos,Factura tanque,eliminar (política)
+Consolidado/Vehículos,N° SOAT,eliminar (política)
+Consolidado/Vehículos,Seguro todo riesgo - aseguradora,eliminar (política)
+Consolidado/Vehículos,Seguro todo riesgo - vigencia,eliminar (política)
+Consolidado/Vehículos,Responsabilidad,eliminar (política)
+Consolidado/Vehículos,Deducible,eliminar (política)
+Consolidado/Vehículos,N° póliza,eliminar (política)
+Consolidado/Vehículos,Vigencia póliza,eliminar (política)
+Consolidado/Vehículos,Cupo o póliza N°,eliminar (política)
+Consolidado/Vehículos,Revisión técnico-mecánica N°,eliminar (política)
+Consolidado/Vehículos,Impuesto municipal,eliminar (política)
+Consolidado/Vehículos,Avalúo (COP),eliminar (política)
+Consolidado/Mantenimientos,Placa,placa
+Consolidado/Mantenimientos,Fecha,conservar
+Consolidado/Mantenimientos,Descripción,texto
+Consolidado/Mantenimientos,Tipo,conservar
+Consolidado/Mantenimientos,Kilometraje acumulado,conservar
+Consolidado/Mantenimientos,Orden de servicio,orden
+Consolidado/Mantenimientos,Costo (COP),conservar
+Consolidado/Mantenimientos,Prestador del servicio,taller
+Consolidado/Plan,Placa,placa
+Consolidado/Plan,Año del plan,conservar
+Consolidado/Plan,Rutina,conservar
+Consolidado/Plan,Servicio del plan (km),conservar
+Consolidado/Plan,Km programado,conservar
+Consolidado/Plan,Fecha programada,conservar
+Consolidado/Plan,Km ejecutado,conservar
+Consolidado/Plan,Fecha ejecutada,conservar
+Consolidado/Plan,Texto original programado,texto
+Consolidado/Plan,Texto original ejecutado,texto
+Consolidado/Plan,Observación,texto
+eventos,AssetSiteName,sitio
+eventos,ReportGroup,texto
+eventos,AssetExtra,placa
+eventos,Asset2SiteName,sitio
+eventos,Asset2ReportGroup,conservar
+eventos,AssetName2,conductor
+eventos,FleetNumber,conservar
+eventos,TripID,conservar
+eventos,EventKey,conservar
+eventos,EventDescription,conservar
+eventos,EventType,conservar
+eventos,EventStartDate,conservar
+eventos,EventStartTime,conservar
+eventos,EventEndDate,conservar
+eventos,EventEndTime,conservar
+eventos,TimeZone,conservar
+eventos,TotalOccurs,conservar
+eventos,EventValue,conservar
+eventos,MeasurementUnits,conservar
+eventos,RoadSpeedLimit,conservar
+eventos,EventLocation,conservar
+eventos,TotalDuration,conservar
+eventos,StartOdo,conservar
+eventos,EndOdo,conservar
+eventos,F_StartTown,region
+eventos,F_StartRegion,conservar
+eventos,F_EndTown,region
+eventos,F_EndRegion,conservar
+eventos,FuelUsed,conservar
+eventos,DistanceCalculatedFromOdo,conservar
+eventos,AssetName,eliminar (política)
+eventos,AssetID,eliminar (política)
+eventos,AssetExtra2,eliminar (política)
+eventos,AssetID2,eliminar (política)
+eventos,F_StartStreet,eliminar (política)
+eventos,F_StartSuburb,eliminar (política)
+eventos,F_StartCity,eliminar (política)
+eventos,F_EndStreet,eliminar (política)
+eventos,F_EndSuburb,eliminar (política)
+eventos,F_EndCity,eliminar (política)
+eventos,StartLocation,eliminar (política)
+eventos,EndLocation,eliminar (política)
+eventos,StartLatLong,eliminar (política)
+eventos,EndLatLong,eliminar (política)
+viajes,AssetExtra,placa
+viajes,SiteName,sitio
+viajes,DepartureDate,conservar
+viajes,AssetName2,conductor
+viajes,FleetNumber,conservar
+viajes,DepartureTime,conservar
+viajes,TimeZone1,conservar
+viajes,DepartFrom,region
+viajes,TripType,conservar
+viajes,TripClassificationComment,conservar
+viajes,DrivingTime,conservar
+viajes,StandingTime,conservar
+viajes,Duration,conservar
+viajes,Distance,conservar
+viajes,StartOdoMeter,conservar
+viajes,EndOdoMeter,conservar
+viajes,MaxSpeed,conservar
+viajes,AvgSpeed,conservar
+viajes,ArrivalTime,conservar
+viajes,ArrivalDate,conservar
+viajes,TimeZone2,conservar
+viajes,ArriveAt,region
+viajes,NextDepartureDateTime,conservar
+viajes,TimeZone,conservar
+viajes,TimeAtLocation,conservar
+viajes,PassengerList,conservar
+viajes,NrOfVisits,conservar
+viajes,BlankJourneyType,conservar
+viajes,TotalFuelUsedMeasured,conservar
+viajes,CalcFuelConsumption,conservar
+viajes,AssetHostID,eliminar (política)
+viajes,AssetID,eliminar (política)
+viajes,AssetExtra2,eliminar (política)
+viajes,StartLatLong,eliminar (política)
+viajes,EndLatLong,eliminar (política)
